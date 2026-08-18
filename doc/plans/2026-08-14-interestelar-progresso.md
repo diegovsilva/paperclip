@@ -825,3 +825,108 @@ em `tests/test_webhook_flow_e2e.py` — dispara dois heartbeats de verdade conco
 desatribuição. Suíte completa via Docker (`python:3.12-slim` + `git`): **66 passed**
 (65 anteriores + 1 novo), zero regressão. Fix já deployado no ambiente ao vivo
 (`docker compose up -d --force-recreate --no-deps harness`).
+
+### 2026-08-18 (continuação) — Loop protection: cooldown robusto + Approval Gate validado 100% ao vivo, ponta a ponta
+
+Sessão continuou depois do fix acima. Um detalhe operacional real primeiro: em vários
+pontos usei `docker compose up -d --force-recreate --no-deps harness` (sem `--build`)
+depois de editar código — isso recria o container só com a IMAGEM antiga, sem
+reconstruir. Perdi tempo testando "ao vivo" contra código velho até perceber (o sintoma:
+o mesmo bug de company_id continuava reproduzindo depois de eu já ter corrigido o
+código). Lição registrada aqui pra não repetir: sempre `--build --force-recreate` depois
+de mudar `harness/`, nunca só `--force-recreate`.
+
+**1. Loop protection ainda duplicava avisos — cooldown baseado em estado externo não
+era robusto o bastante.** O fix anterior (serializar a checagem sob o lock + checar "o
+ticket já está sem assignee e bloqueado?") ainda falhou ao vivo: 3 comentários "loop de
+revisões detectado" postados em ~1.2s. Causa: a fila interna do Paperclip reatribui
+heartbeats presos entre um trip e o próximo (log real:
+`claimQueuedRun: cancelled stale queued run ... errorCode: issue_assignee_changed`),
+então "o ticket já está bloqueado?" podia dar falso-negativo. Troquei por um cooldown
+que não depende de NADA externo — só um `dict[str, float]` nosso
+(`_loop_protection_ultimo_aviso`), usando `hard_loop_window_min` como janela. Novo
+teste de regressão sequencial (reatribuição externa simulada no meio) +
+suíte completa: **67 passed**.
+
+**2. `create_approval` sem `company_id` explícito — caía num valor cacheado e
+desatualizado.** Testando o Approval Gate ao vivo pela primeira vez (chamando
+`_finalizar_ou_abrir_gate_governanca` direto, com `PaperclipClient` real, pra não
+gastar TPM da Groq): `POST /companies/618f17cc-.../approvals` → 403 "User does not
+have access to this company". `618f17cc-...` era o company_id de uma sessão de teste
+de **dois dias antes** (2026-08-17), ainda guardado no SQLite do harness
+(`runtime_config`, banco > env — comportamento correto, só que eu esqueci de passar
+`company_id` explícito no `create_approval`, então ele caiu nesse default velho em vez
+do `company_id` real que `_finalizar_ou_abrir_gate_governanca` já recebe por
+parâmetro). Corrigido: `company_id=company_id` explícito na chamada. Suíte: **68
+passed** (novo assert de regressão no teste existente do gate).
+
+**3. Approval aprovada não acordava ninguém — desatribuir o ticket quebrava o wakeup
+nativo do core.** Depois do fix #2, a approval foi criada certinho e um `POST
+/approvals/:id/approve` de verdade (simulando um humano clicando) retornou 200 — mas
+o Head nunca foi acordado. Investigando: `GET /companies/:id/heartbeat-runs` mostrou
+o run com `wakeReason: approval_approved` e `status: cancelled`,
+`errorCode: issue_assignee_changed`, `error: "Cancelled because issue assignee
+changed before the queued run could start"`. Lendo `evaluateQueuedRunStaleness` em
+`server/src/services/heartbeat.ts`: o core cancela o run se
+`issue.assigneeAgentId !== run.agentId` (e não é um "interaction wake", que exige
+`wakeCommentId` — approvals não têm). Como o gate desatribuía o ticket
+(`clear_assignee_agent=True`, o mesmo padrão usado em todo o resto do harness pra
+evitar self-wake-loop), o assignee nunca batia com `requestedByAgentId` (Head) no
+momento da aprovação — TODA aprovação real estava condenada a nunca acordar ninguém.
+Corrigido em duas partes:
+- `_abrir_ou_verificar_gate_governanca` agora ATRIBUI ao Head (`assignee_agent_id=head_id`)
+  em vez de desatribuir, ao abrir o gate.
+- Novo guard no início de `_process_demanda_agent`: se o Head for acordado (por
+  qualquer motivo — inclusive o próprio comentário "Aguardando aprovação..." reacordando
+  via `issue_commented`) enquanto já existe uma approval do gate ainda
+  pending/revision_requested pra este ticket, não chama o LLM — só espera.
+
+  Achado à parte, ao testar isso: o FakeClient dos testes tinha uma lacuna —
+  `update_issue(assignee_agent_id=...)` guardava a chave crua `assignee_agent_id`
+  (snake_case) em vez de traduzir pra `assigneeAgentId` (camelCase, o que os testes de
+  fato leem) — igual o client real faz. Um teste ficou "verde" checando um campo que
+  nunca era realmente escrito. Corrigido no dublê. **68 passed** (contagem igual — 1
+  teste corrigido + 1 novo compensou 1 teste ajustado).
+
+**Validação real, ponta a ponta, pela primeira vez**: criei um ticket real (`DAT-4`)
+com a label `governanca-requer-aprovacao`, o gate criou a approval de verdade, aprovei
+via `POST /approvals/:id/approve` (o mesmo endpoint que o botão da UI chama), o core
+disparou o wakeup, o run **succeeded** (não mais cancelled), o Head processou sem
+chamar o LLM, e o ticket fechou: `status: done`, `assigneeAgentId: null`. Fluxo
+completo confirmado contra o Paperclip real, não só mock.
+
+**4. Bônus, achado fechando o `DAT-4`: upload de anexo nunca tinha funcionado de
+verdade.** `_finalizar_como_head` tentou subir o markdown consolidado como anexo →
+`400 Bad Request: "Missing file field 'file'"`. `upload_attachment` mandava o arquivo
+como corpo bruto (`content=data`) com `Content-Type` = mime do arquivo — mas o core
+usa `multer.single("file")` (`server/src/routes/issues.ts`), que exige
+multipart/form-data de verdade com um campo chamado exatamente `"file"`, e o nome do
+arquivo vem do próprio multipart (`file.originalname`), não de `?filename=` na query.
+Como essa chamada sempre foi envolvida num `try/except` que só loga warning, esse bug
+existia silenciosamente desde a implementação original (Fase 4) — nenhum anexo de
+fechamento de demanda jamais chegou a subir de verdade contra o core real, em nenhuma
+sessão anterior. Corrigido:
+- `upload_attachment` agora usa `files={"file": (name, data, mime)}` (multipart de
+  verdade) em vez de `content=`/`params=filename`.
+- `_request` (genérico, usado por todo o client) agora remove o `Content-Type:
+  application/json` default quando `files=` é passado — senão o header fixo
+  sobrescrevia o `multipart/form-data; boundary=...` que o httpx gera sozinho,
+  quebrando o parse no servidor mesmo com o campo certo.
+- Threaded `company_id` explícito até `_finalizar_como_head` (não tinha o parâmetro
+  antes) — mesma causa raiz do bug #2, seria o próximo 403 na fila.
+
+  Validado ao vivo isoladamente (`upload_attachment` chamado direto contra o ticket
+  real): `201 Created`, anexo apareceu de verdade no ticket. Novo arquivo de teste
+  [tests/test_paperclip_client.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/tests/test_paperclip_client.py)
+  — primeiro teste do projeto a inspecionar a requisição HTTP de verdade
+  (`httpx.MockTransport`) em vez de só a lógica em volta dela: confirma
+  `Content-Type: multipart/form-data; boundary=...` e o campo `file` no upload, e
+  confirma que chamadas normais continuam `application/json` (o fix não vazou pra
+  fora do caminho de upload). **70 passed** (68 + 2 novos).
+
+**Resumo de bugs reais encontrados e corrigidos só nesta sessão de teste ao vivo**: 1
+erro operacional meu (permissão de arquivo por processo zumbi), 2 variantes do bug de
+loop protection duplicando aviso, 1 bug de company_id no Approval Gate, 1 bug de
+design do Approval Gate (desatribuir quebrava o wakeup nativo), 1 bug de contrato HTTP
+nunca antes exercitado (upload de anexo). Nenhum desses seria pego só com testes
+mockados — todos exigiram uma instância real do Paperclip rodando.

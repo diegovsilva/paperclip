@@ -301,6 +301,7 @@ async def _finalizar_como_head(
     issue_data: dict[str, Any],
     comments_history: list[dict[str, Any]],
     plan: list[str],
+    company_id: Optional[str] = None,
 ) -> None:
     partes: list[str] = []
     for c in comments_history:
@@ -348,11 +349,19 @@ async def _finalizar_como_head(
     except Exception as exc:  # noqa: BLE001
         log.warning("work_product.create.failed", issue=issue_id, err=str(exc))
     try:
+        # company_id EXPLÍCITO — mesma causa raiz do bug achado ao vivo em
+        # 2026-08-18 no Approval Gate (ver _abrir_ou_verificar_gate_governanca):
+        # sem isso, upload_attachment cai no default resolvido pelo próprio client
+        # (banco > env), que pode estar desatualizado em relação ao company_id real
+        # desta demanda — a chamada foi pra empresa errada e voltou 403 "User does
+        # not have access to this company" (attachment nunca sobe, silenciosamente,
+        # o except abaixo só loga warning e segue o fechamento mesmo assim).
         await client.upload_attachment(
             issue_id=issue_id,
             file_path=demanda_path,
             mime="text/markdown",
             filename=demanda_path.name,
+            company_id=company_id,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("attachment.upload.failed", issue=issue_id, err=str(exc))
@@ -451,6 +460,14 @@ async def _abrir_ou_verificar_gate_governanca(
 
     head_id = await _encontrar_agente_id_por_slug(client, company_id, "head")
     try:
+        # company_id EXPLÍCITO — sem isso, create_approval cai no default resolvido
+        # pelo próprio client (runtime_config, banco > env), que pode estar
+        # desatualizado em relação ao company_id que esta demanda de verdade está
+        # usando (achado ao vivo em 2026-08-18: o client tinha em cache o company_id
+        # de uma sessão de teste anterior — a chamada foi pra empresa errada e voltou
+        # 403 "User does not have access to this company"). O resto do pipeline de
+        # demanda já resolve e passa `company_id` por parâmetro exatamente pra evitar
+        # esse descompasso — este era o único ponto que esquecia de usá-lo.
         await client.create_approval(
             approval_type="request_board_approval",
             payload={
@@ -460,6 +477,7 @@ async def _abrir_ou_verificar_gate_governanca(
             },
             requested_by_agent_id=head_id,
             issue_ids=[issue_id],
+            company_id=company_id,
         )
     except Exception as exc:  # noqa: BLE001
         log.error("governanca_gate.create_approval.failed", issue=issue_id, err=str(exc))
@@ -467,7 +485,21 @@ async def _abrir_ou_verificar_gate_governanca(
         # não fechar do que fechar sem o sign-off que a própria label pediu.
         return "aguardando"
     try:
-        await client.update_issue(issue_id, status="blocked", clear_assignee_agent=True)
+        # NÃO desatribui (diferente do padrão usado no resto do harness pra evitar
+        # self-wake-loop) — precisa ficar com o Head. Achado ao vivo em 2026-08-18: o
+        # core cancela o heartbeat de aprovar/rejeitar antes mesmo dele chegar no
+        # webhook se `issue.assigneeAgentId !== run.agentId` no momento da aprovação
+        # (`evaluateQueuedRunStaleness` em server/src/services/heartbeat.ts,
+        # errorCode "issue_assignee_changed") — e `run.agentId` é sempre o
+        # `requestedByAgentId` da approval (Head). Sem manter o Head atribuído, a
+        # aprovação de um humano nunca chega a acordar ninguém. O risco de self-wake
+        # (nosso próprio comentário abaixo reacorda o Head via issue_commented) é
+        # coberto por outro guard: ver o bloco logo acima de
+        # `_process_demanda_agent` que descarta heartbeats do Head pra tickets com
+        # approval do gate ainda pending, sem chamar o LLM.
+        await client.update_issue(
+            issue_id, status="blocked", assignee_agent_id=head_id
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("governanca_gate.block_issue.failed", issue=issue_id, err=str(exc))
     try:
@@ -527,11 +559,11 @@ async def _finalizar_ou_abrir_gate_governanca(
     """Chamado em todo ponto onde o Head fecharia a demanda — decide se fecha de vez ou
     se precisa abrir/checar o Approval Gate da Governança primeiro (ver bloco acima)."""
     if not _tem_label_governanca(issue_data):
-        await _finalizar_como_head(client, issue_id, issue_data, comments_history, plan)
+        await _finalizar_como_head(client, issue_id, issue_data, comments_history, plan, company_id)
         return
     resultado = await _abrir_ou_verificar_gate_governanca(client, issue_id, issue_data, company_id)
     if resultado == "aprovado":
-        await _finalizar_como_head(client, issue_id, issue_data, comments_history, plan)
+        await _finalizar_como_head(client, issue_id, issue_data, comments_history, plan, company_id)
     elif resultado == "rejeitado":
         await _rejeitar_gate_governanca(client, issue_id, company_id)
     # "aguardando": _abrir_ou_verificar_gate_governanca já bloqueou/comentou (ou já
@@ -620,7 +652,7 @@ async def _process_demanda_agent(
         if resultado == "aprovado":
             plano_fechamento = _descobrir_plano_do_historico(history_tuples, issue_data)
             try:
-                await _finalizar_como_head(client, issue_id, issue_data, raw_comments, plano_fechamento)
+                await _finalizar_como_head(client, issue_id, issue_data, raw_comments, plano_fechamento, company_id)
             except Exception as exc:  # noqa: BLE001
                 log.error("head.fechamento.falhou", issue=issue_id, err=str(exc))
         elif resultado == "rejeitado":
@@ -629,6 +661,23 @@ async def _process_demanda_agent(
         # estivesse pending mesmo depois de um wake de approval resolvida) — nada a fazer
         # além do log já emitido dentro de _abrir_ou_verificar_gate_governanca.
         return
+
+    if agent_slug == "head" and _tem_label_governanca(issue_data):
+        # O Head fica ATRIBUÍDO ao ticket enquanto espera a approval (ver
+        # _abrir_ou_verificar_gate_governanca — não é mais desatribuído, achado ao vivo
+        # abaixo). Isso significa que qualquer wake genérico (ex.: o próprio comentário
+        # "Aguardando aprovação..." reacordando via issue_commented) cai aqui. Se já
+        # existe uma approval do gate ainda pending/revision_requested pra este ticket,
+        # não há nada pro Head fazer além de esperar — não chama o LLM de novo.
+        aprovacao_pendente = await _obter_approval_governanca_mais_recente(client, issue_id)
+        if aprovacao_pendente and aprovacao_pendente.get("status") in ("pending", "revision_requested"):
+            log.info(
+                "head.aguardando_approval_governanca",
+                issue=issue_id,
+                wake_reason=payload.context.wakeReason,
+                approval_id=aprovacao_pendente.get("id"),
+            )
+            return
 
     pattern_md = await _carregar_padrao_do_contexto(issue_data)
     state = await mem.obter_estado_revisoes(issue_id)

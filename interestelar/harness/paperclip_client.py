@@ -133,6 +133,13 @@ class PaperclipClient:
         await self._ensure_dynamic_config()
         url = f"{self.base_url}/{path.lstrip('/')}"
         hdrs = self._headers(headers)
+        if files is not None:
+            # multipart/form-data precisa que o httpx gere o Content-Type sozinho (com
+            # o boundary) — o "application/json" default de _headers sobrescreve isso e
+            # quebra o parse no servidor. Achado ao vivo em 2026-08-18: o upload de
+            # anexo (usado por upload_attachment) sempre voltava 400 "Missing file
+            # field 'file'" — o multer do core nem reconhecia como multipart.
+            hdrs.pop("Content-Type", None)
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             r = await client.request(
                 method,
@@ -515,14 +522,18 @@ class PaperclipClient:
         cid = await self._require_company_id(company_id)
         name = filename or file_path.name
         data = file_path.read_bytes()
-        headers = {"Content-Type": mime}
-        params = {"filename": name}
+        # O core espera multipart/form-data de verdade, com um campo chamado
+        # exatamente "file" (multer `.single("file")` em
+        # server/src/routes/issues.ts) — não corpo bruto com Content-Type do mime do
+        # arquivo. `?filename=` na query também não é o contrato real: o nome do
+        # arquivo vem do próprio multipart (file.originalname), por isso vai na
+        # tupla abaixo, não em `params`. Achado ao vivo em 2026-08-18: a versão
+        # antiga (content= + params=filename) sempre voltava 400 "Missing file
+        # field 'file'" — nunca tinha funcionado de verdade contra o core real.
         return await self._request(
             "POST",
             f"/companies/{cid}/issues/{issue_id}/attachments",
-            content=data,
-            params=params,
-            headers=headers,
+            files={"file": (name, data, mime)},
         )
 
     async def create_approval(

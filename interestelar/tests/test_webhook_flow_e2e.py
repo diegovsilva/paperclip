@@ -69,8 +69,17 @@ class FakeClient:
         self.update_issue_calls.append(dict(kw))
         if kw.get("clear_assignee_agent"):
             self.issue["assigneeAgentId"] = None
+        # PaperclipClient.update_issue usa nomes snake_case (assignee_agent_id) que
+        # viram camelCase (assigneeAgentId) no payload JSON real — o dublê precisa
+        # traduzir do mesmo jeito, senão um `assignee_agent_id=...` passado aqui vira
+        # uma chave solta no dict que ninguém lê (achado ao vivo em 2026-08-18: o
+        # gate da Governança ficou "sem efeito" num teste porque o assignee esperado
+        # nunca era realmente aplicado no FakeClient, embora funcionasse contra o
+        # client real).
+        if kw.get("assignee_agent_id") is not None:
+            self.issue["assigneeAgentId"] = kw["assignee_agent_id"]
         for k, v in kw.items():
-            if k == "clear_assignee_agent":
+            if k in ("clear_assignee_agent", "assignee_agent_id"):
                 continue
             if v is not None:
                 self.issue[k] = v
@@ -88,7 +97,7 @@ class FakeClient:
         return {"id": "wp-1"}
 
     async def upload_attachment(self, issue_id: str, file_path, mime: str, filename=None, company_id=None) -> dict:
-        self.attachments.append((issue_id, str(file_path), mime))
+        self.attachments.append((issue_id, str(file_path), mime, company_id))
         return {"id": "att-1"}
 
     async def callback_heartbeat_run(self, run_id: str, status_: str, result=None) -> dict:
@@ -112,6 +121,7 @@ class FakeClient:
             "decisionNote": None,
             "createdAt": f"2026-08-18T00:00:{len(self.approvals):02d}Z",
             "_issueIds": list(issue_ids or []),
+            "_companyId": company_id,
         }
         self.approvals.append(approval)
         return approval
@@ -213,6 +223,11 @@ async def test_fluxo_completo_com_revisao_cruzada_retorna_para_quem_pediu(isolat
     assert client.issue["status"] == "done"
     assert len(client.work_products) == 1
     assert len(client.attachments) == 1
+    # Regressão: upload_attachment precisa do company_id explícito — mesma causa raiz
+    # do bug do Approval Gate (achado ao vivo em 2026-08-18): sem isso, cai no default
+    # do client (banco > env), que pode estar desatualizado — a chamada foi pra
+    # empresa errada e voltou 403, sem ninguém perceber (o anexo só não subia).
+    assert client.attachments[0][3] == COMPANY_ID
 
     # contadores de revisão são resetados ao fechar
     estado_final = await mem.obter_estado_revisoes(ISSUE_ID)
@@ -256,16 +271,77 @@ async def test_gate_governanca_bloqueia_fechamento_e_cria_approval(isolated_sett
     await _run_heartbeat(monkeypatch, client, "governanca", governanca_out, "run-gate-1", issue_id=gate_issue_id)
 
     assert client.issue["status"] == "blocked"
-    assert client.issue["assigneeAgentId"] is None
+    # Fica atribuído ao Head (não desatribuído) enquanto espera — diferente do padrão
+    # usado no resto do harness. Achado ao vivo em 2026-08-18: o core do Paperclip
+    # cancela o heartbeat de aprovação antes de chegar no webhook se o assignee atual
+    # não bater com quem pediu a approval (`evaluateQueuedRunStaleness`,
+    # errorCode "issue_assignee_changed") — desatribuir aqui quebrava o wake depois.
+    assert client.issue["assigneeAgentId"] == _agent_id_for("head")
     assert len(client.approvals) == 1
     approval = client.approvals[0]
     assert approval["type"] == "request_board_approval"
     assert approval["payload"]["interestelarGate"] == "governanca_sign_off"
     assert approval["requestedByAgentId"] == _agent_id_for("head")
+    # Regressão: create_approval precisa do company_id explícito — sem isso, cai no
+    # default resolvido pelo PaperclipClient (banco > env), que pode estar desatualizado
+    # em relação ao company_id real desta demanda (achado ao vivo em 2026-08-18: a
+    # chamada foi pra uma empresa errada, cacheada de sessão anterior, e voltou 403).
+    assert approval["_companyId"] == COMPANY_ID
     # Não fechou de verdade: nenhum work product/attachment do fechamento foi criado.
     assert client.work_products == []
     assert client.attachments == []
     assert any("Approvals" in c["body"] for c in client.comments)
+
+
+async def test_gate_governanca_pendente_head_acordado_por_outro_motivo_nao_chama_llm(
+    isolated_settings, monkeypatch
+):
+    """Como o Head fica atribuído enquanto espera a approval (ver teste acima), o
+    próprio comentário "Aguardando aprovação..." do gate reacorda ele via
+    issue_commented — e qualquer outro heartbeat nesse meio tempo (comentário de
+    terceiros, etc.) também. Nenhum desses deveria rodar o LLM: só faz sentido agir de
+    novo quando o wake for especificamente approval_approved/approval_rejected."""
+    from harness import webhook as wh
+
+    gate_issue_id = "issue-gate-pending-wake"
+    client = FakeClient()
+    client.issue["id"] = gate_issue_id
+    client.issue["labels"] = [{"id": "l1", "name": "governanca-requer-aprovacao"}]
+    client.issue["status"] = "blocked"
+    client.issue["assigneeAgentId"] = _agent_id_for("head")
+    client.approvals.append(
+        {
+            "id": "approval-1",
+            "type": "request_board_approval",
+            "payload": {"interestelarGate": "governanca_sign_off"},
+            "requestedByAgentId": _agent_id_for("head"),
+            "status": "pending",
+            "decisionNote": None,
+            "createdAt": "2026-08-18T00:00:00Z",
+            "_issueIds": [gate_issue_id],
+        }
+    )
+
+    chamou_llm = False
+
+    async def _fake_executar_agente(inp):
+        nonlocal chamou_llm
+        chamou_llm = True
+        return AgentOutput(raw_text="não deveria rodar", stage_complete=True)
+
+    monkeypatch.setattr(wh, "executar_agente", _fake_executar_agente)
+
+    payload = HeartbeatPayload(
+        runId="run-gate-pending-wake",
+        agentId=_agent_id_for("head"),
+        companyId=COMPANY_ID,
+        context=HeartbeatContext(taskId=gate_issue_id, wakeReason="issue_commented"),
+    )
+    await wh._process_agent_webhook("head", payload, client)
+
+    assert chamou_llm is False
+    assert len(client.approvals) == 1, "não deveria criar uma segunda approval"
+    assert client.issue["assigneeAgentId"] == _agent_id_for("head"), "continua atribuído, esperando"
 
 
 async def test_gate_governanca_pendente_nao_duplica_approval_nem_comentario(isolated_settings):
@@ -303,7 +379,7 @@ async def test_gate_governanca_aprovado_fecha_o_ticket_via_wake(isolated_setting
     client.issue["id"] = gate_issue_id
     client.issue["labels"] = [{"id": "l1", "name": "governanca-requer-aprovacao"}]
     client.issue["status"] = "blocked"
-    client.issue["assigneeAgentId"] = None
+    client.issue["assigneeAgentId"] = _agent_id_for("head")
     client.approvals.append(
         {
             "id": "approval-1",
@@ -351,6 +427,7 @@ async def test_gate_governanca_rejeitado_via_wake_volta_pra_governanca(isolated_
     client.issue["id"] = gate_issue_id
     client.issue["labels"] = [{"id": "l1", "name": "governanca-requer-aprovacao"}]
     client.issue["status"] = "blocked"
+    client.issue["assigneeAgentId"] = _agent_id_for("head")
     client.approvals.append(
         {
             "id": "approval-1",
