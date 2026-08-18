@@ -67,6 +67,10 @@ _heartbeat_timestamps: dict[str, Deque[float]] = defaultdict(deque)
 # ticket depois que o primeiro terminou de escrever nele.
 _issue_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
+# Cooldown próprio (não depende do estado externo do ticket) pra idempotência do aviso
+# de loop protection — ver _reportar_loop_protection.
+_loop_protection_ultimo_aviso: dict[str, float] = {}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -864,29 +868,36 @@ async def _process_agent_webhook(
 
     async def _reportar_loop_protection() -> None:
         if issue_id:
-            # Idempotência: o lock por issue (ver chamador) garante que duas chamadas
-            # concorrentes não leem-e-escrevem intercaladas, mas NÃO impede uma segunda
-            # chamada sequencial de tripar de novo — o deque de _check_loop_protection
-            # não é resetado ao tripar, então a segunda chamada ainda vê o cap
-            # excedido. Confirmado ao vivo em 2026-08-18: dois heartbeats concorrentes
-            # pro mesmo ticket, sob rate limit real da Groq empilhando heartbeats,
-            # cada um tripou a proteção e postou o mesmo aviso separadamente. Checando
-            # o estado atual do ticket antes de agir: se já está sem assignee e
-            # bloqueado, alguém (o lock garante que foi uma chamada anterior, não uma
-            # concorrente) já tripou — só descarta este heartbeat, sem comentar de novo.
-            try:
-                atual = await client.get_issue(issue_id)
-                if atual.get("assigneeAgentId") is None and atual.get("status") == "blocked":
-                    log.info("loop.ja_reportado.descartado", issue=issue_id)
-                    await _safe_callback_heartbeat(
-                        client,
-                        payload.runId,
-                        "failed",
-                        result="Hard loop protection já reportado neste ticket — aguardando intervenção humana.",
-                    )
-                    return
-            except Exception as exc:  # noqa: BLE001
-                log.warning("loop.checar_estado_atual.failed", issue=issue_id, err=str(exc))
+            # Idempotência: o lock por issue (ver chamador) serializa as chamadas, mas
+            # NÃO impede uma chamada sequencial de tripar de novo — o deque de
+            # _check_loop_protection não é resetado ao tripar, e heartbeats atrasados
+            # (retry/fila do próprio Paperclip) continuam chegando por minutos depois
+            # do primeiro trip. A primeira versão deste fix checava "o ticket já está
+            # sem assignee e bloqueado?" antes de comentar de novo — mas isso não é
+            # robusto: confirmado ao vivo em 2026-08-18 que outro processo (a fila
+            # interna do Paperclip reatribuindo heartbeats presos) pode reatribuir o
+            # ticket ENTRE um trip e o próximo, fazendo essa checagem falhar (viu
+            # assignee != None de novo) e reportar mais uma vez — 3 comentários "loop
+            # detectado" postados em ~1.2s numa única rajada. Cooldown só nosso, sem
+            # depender de estado externo mutável, resolve de vez.
+            agora = time.time()
+            ultimo_aviso = _loop_protection_ultimo_aviso.get(issue_id)
+            tuning = await runtime_config.obter_tuning_resumo()
+            cooldown_sec = tuning.hard_loop_window_min * 60
+            if ultimo_aviso is not None and (agora - ultimo_aviso) < cooldown_sec:
+                log.info(
+                    "loop.ja_reportado.descartado",
+                    issue=issue_id,
+                    ha_segundos=round(agora - ultimo_aviso, 1),
+                )
+                await _safe_callback_heartbeat(
+                    client,
+                    payload.runId,
+                    "failed",
+                    result="Hard loop protection já reportado neste ticket — aguardando intervenção humana.",
+                )
+                return
+            _loop_protection_ultimo_aviso[issue_id] = agora
 
         await _safe_callback_heartbeat(
             client,

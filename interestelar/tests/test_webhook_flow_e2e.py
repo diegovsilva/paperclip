@@ -523,6 +523,59 @@ async def test_loop_protection_concorrente_no_mesmo_ticket_comenta_uma_vez_so(is
     assert len(unassign_calls) == 1, "desatribuir também deveria acontecer só uma vez"
 
 
+async def test_loop_protection_sequencial_com_reatribuicao_externa_no_meio_nao_reporta_de_novo(
+    isolated_settings,
+):
+    """Mesmo incidente ao vivo (2026-08-18), variante sequencial: a primeira versão do
+    fix checava 'o ticket já está sem assignee e bloqueado?' antes de reportar de
+    novo — mas isso falhava quando outro processo (a fila interna do Paperclip
+    reatribuindo heartbeats presos, confirmado no log real:
+    'claimQueuedRun: cancelled stale queued run ... issue_assignee_changed')
+    reatribuía o ticket ENTRE um trip e o próximo heartbeat que chegava minutos
+    depois. Um cooldown baseado só em estado nosso (não no estado externo mutável do
+    ticket) precisa continuar descartando mesmo com essa reatribuição no meio."""
+    import time
+
+    from harness import webhook as wh
+    from harness.config import get_settings
+
+    loop_issue_id = "issue-loop-sequential-test"
+    client = FakeClient()
+    client.issue["id"] = loop_issue_id
+    client.issue["assigneeAgentId"] = _agent_id_for("head")
+    client.issue["status"] = "in_progress"
+
+    cap = get_settings().hard_loop_heartbeat_cap
+    wh._heartbeat_timestamps[loop_issue_id].extend([time.time()] * cap)
+
+    payload_1 = HeartbeatPayload(
+        runId="run-loop-seq-a",
+        agentId=_agent_id_for("head"),
+        companyId=COMPANY_ID,
+        context=HeartbeatContext(taskId=loop_issue_id, wakeReason="issue_commented"),
+    )
+    await wh._process_agent_webhook("head", payload_1, client)
+    assert client.issue["assigneeAgentId"] is None
+    assert client.issue["status"] == "blocked"
+
+    # Algo externo (fila do próprio Paperclip) reatribui o ticket antes do próximo
+    # heartbeat atrasado chegar — a checagem antiga ("já está sem assignee?") não
+    # detectaria mais o trip anterior nesse ponto.
+    client.issue["assigneeAgentId"] = _agent_id_for("governanca")
+    client.issue["status"] = "in_progress"
+
+    payload_2 = HeartbeatPayload(
+        runId="run-loop-seq-b",
+        agentId=_agent_id_for("governanca"),
+        companyId=COMPANY_ID,
+        context=HeartbeatContext(taskId=loop_issue_id, wakeReason="issue_assigned"),
+    )
+    await wh._process_agent_webhook("governanca", payload_2, client)
+
+    avisos = [c for c in client.comments if "loop de revis" in c["body"].lower()]
+    assert len(avisos) == 1, f"esperava exatamente 1 aviso de loop mesmo com reatribuição no meio, vieram {len(avisos)}"
+
+
 async def test_head_ignora_ticket_interno_do_paperclip_sem_chamar_llm(isolated_settings, monkeypatch):
     """Tickets que o próprio Paperclip cria sozinho (revisão de produtividade,
     recuperação de ticket parado, ...) não são demandas de dados — o Head não deve
