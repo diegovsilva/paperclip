@@ -525,6 +525,36 @@ class PaperclipClient:
             headers=headers,
         )
 
+    async def create_approval(
+        self,
+        approval_type: str,
+        payload: dict[str, Any],
+        requested_by_agent_id: Optional[str] = None,
+        issue_ids: Optional[list[str]] = None,
+        company_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """`type` é um enum FECHADO no core (`APPROVAL_TYPES` em
+        packages/shared/src/constants.ts): só `hire_agent`, `approve_ceo_strategy`,
+        `budget_override_required`, `request_board_approval` — não dá pra inventar um
+        tipo customizado (ex.: "governanca_sign_off"), o Zod rejeita com 400. Pro
+        Approval Gate da Governança usamos `request_board_approval`, que é o único
+        genérico o bastante pra "isto precisa de sign-off humano".
+
+        Resolver (`/approvals/:id/approve|reject`) exige `assertBoard` — só um humano
+        autenticado como board resolve, nunca um agente sozinho. `requested_by_agent_id`
+        só define quem é acordado automaticamente quando alguém aprova (ver
+        `list_issue_approvals` e o heartbeat `wakeReason=approval_approved`)."""
+        cid = await self._require_company_id(company_id)
+        body: dict[str, Any] = {"type": approval_type, "payload": payload}
+        if requested_by_agent_id is not None:
+            body["requestedByAgentId"] = requested_by_agent_id
+        if issue_ids is not None:
+            body["issueIds"] = issue_ids
+        return await self._request("POST", f"/companies/{cid}/approvals", json=body)
+
+    async def list_issue_approvals(self, issue_id: str) -> list[dict[str, Any]]:
+        return await self._request("GET", f"/issues/{issue_id}/approvals") or []
+
     async def list_company_skills(self, company_id: Optional[str] = None) -> list[dict[str, Any]]:
         cid = await self._require_company_id(company_id)
         return await self._request("GET", f"/companies/{cid}/skills") or []

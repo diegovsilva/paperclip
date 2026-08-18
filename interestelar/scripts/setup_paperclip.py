@@ -128,6 +128,14 @@ SKILLS_META: list[dict] = [
 PROJECTO_DEMANDAS = "Demandas de Dados — Interestelar"
 LABEL_INTERESTELAR = ("Interestelar", "#7c3aed", "Projeto Interestelar (time 6 agentes + Curador)")
 LABEL_LGPD = ("LGPD", "#2563eb", "Requer validação de Governança / LGPD")
+# Nome precisa bater exatamente com webhook.GOVERNANCA_APPROVAL_LABEL — tickets com
+# esta label não fecham como `done` sem um humano aprovar pela aba Approvals do board
+# (ver seção "Approval Gate da Governança" em harness/webhook.py).
+LABEL_GOVERNANCA_APROVACAO = (
+    "governanca-requer-aprovacao",
+    "#dc2626",
+    "Fechar como done exige aprovação formal do Board (aba Approvals) além do sign-off da Governança",
+)
 
 
 @dataclass
@@ -239,7 +247,7 @@ async def _setup(
 
     existing_labels = await client.list_labels(company_id=company_id)
     labels_map: dict[str, str] = {}
-    for nome, cor, desc in (LABEL_INTERESTELAR, LABEL_LGPD):
+    for nome, cor, desc in (LABEL_INTERESTELAR, LABEL_LGPD, LABEL_GOVERNANCA_APROVACAO):
         l = next((x for x in existing_labels if x.get("name") == nome), None)
         if not l:
             l = await client.create_label(nome, color=cor, description=desc, company_id=company_id)

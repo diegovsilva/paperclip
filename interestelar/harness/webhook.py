@@ -154,6 +154,22 @@ def _extract_plan_from_text(text: str) -> list[str]:
     return tokens
 
 
+def _descobrir_plano_do_historico(
+    history_tuples: list[tuple[str, str, str]],
+    issue_data: dict[str, Any],
+) -> list[str]:
+    """Mesma busca que o fluxo principal faz quando `output.plan` vem vazio (comentário
+    anterior com `#PLANO:`, senão a description) — fatorado pra ser reutilizável também
+    pelo caminho de wake de approval, que não chama o LLM e por isso não tem `output`."""
+    for _autor_nome, _ts, corpo in history_tuples:
+        plano_detectado = _extract_plan_from_text(corpo)
+        if plano_detectado:
+            return plano_detectado
+    if issue_data.get("description"):
+        return _extract_plan_from_text(issue_data["description"]) or []
+    return []
+
+
 def _proximo_agente_do_plano(
     plano: list[str],
     agente_atual: str,
@@ -348,6 +364,176 @@ async def _finalizar_como_head(
     log.info("demanda.fechada", issue=issue_id, vault=str(demanda_path))
 
 
+# ─── Approval Gate da Governança (roadmap §5.2) ────────────────────────────────────
+#
+# Tickets com a label abaixo não fecham automaticamente quando o plano termina — ficam
+# bloqueados esperando um humano aprovar/rejeitar formalmente pela aba "Approvals" do
+# Paperclip antes de virar `done`. Usa o mecanismo nativo de approvals do core
+# (server/src/services/approvals.ts / server/src/routes/approvals.ts), não um
+# comentário nem uma convenção interna do Interestelar.
+#
+# Duas descobertas ao verificar contra o código real do core antes de implementar
+# (mesmo hábito de nunca confiar no contrato estimado do roadmap original):
+# 1. `type` é um enum FECHADO (`APPROVAL_TYPES` em packages/shared/src/constants.ts):
+#    só `hire_agent` / `approve_ceo_strategy` / `budget_override_required` /
+#    `request_board_approval` — não dá pra criar um tipo próprio "governanca_sign_off"
+#    (o Zod rejeitaria com 400). Usamos `request_board_approval` — o único genérico o
+#    bastante — com um marcador nosso dentro do `payload` pra distinguir esta approval
+#    de qualquer outra que a empresa tenha por outro motivo.
+# 2. Só um humano autenticado como Board resolve (`assertBoard` em
+#    POST /approvals/:id/approve|reject) — nenhum agente "auto-aprova" via API, mesmo a
+#    Board API key do harness sendo usada em toda outra chamada do Interestelar. É um
+#    gate de verdade, com fricção manual real — decisão explícita do operador (ver o
+#    registro de progresso do dia desta implementação), não um jeito de automatizar a
+#    Governança sozinha.
+#
+# Assimetria importante: aprovar acorda automaticamente quem pediu a approval
+# (heartbeat wakeReason="approval_approved", ver server/src/routes/approvals.ts) — mas
+# REJEITAR NÃO acorda ninguém (confirmado lendo o handler de /approvals/:id/reject: sem
+# nenhuma chamada a heartbeat.wakeup). Por isso o comentário que abre o gate já pede
+# pro humano também comentar no ticket original se for rejeitar — um comentário nesse
+# ticket aciona o wake genérico "issue_commented" que o Head já trata em qualquer caso.
+GOVERNANCA_APPROVAL_LABEL = "governanca-requer-aprovacao"
+GOVERNANCA_GATE_MARKER = "governanca_sign_off"
+
+
+def _tem_label_governanca(issue_data: dict[str, Any]) -> bool:
+    return any(
+        (label.get("name") or "").strip().lower() == GOVERNANCA_APPROVAL_LABEL
+        for label in issue_data.get("labels") or []
+    )
+
+
+async def _obter_approval_governanca_mais_recente(
+    client: PaperclipClient,
+    issue_id: str,
+) -> Optional[dict[str, Any]]:
+    """A approval mais recente (por createdAt) ligada a este ticket que carrega o
+    marcador do gate. Pode haver mais de uma no tempo — uma rejeitada, depois uma nova
+    após o retrabalho — sempre considera só a última."""
+    try:
+        approvals = await client.list_issue_approvals(issue_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("governanca_gate.list_approvals.failed", issue=issue_id, err=str(exc))
+        return None
+    candidatas = [
+        a for a in approvals
+        if (a.get("payload") or {}).get("interestelarGate") == GOVERNANCA_GATE_MARKER
+    ]
+    if not candidatas:
+        return None
+    candidatas.sort(key=lambda a: a.get("createdAt") or "")
+    return candidatas[-1]
+
+
+async def _abrir_ou_verificar_gate_governanca(
+    client: PaperclipClient,
+    issue_id: str,
+    issue_data: dict[str, Any],
+    company_id: str,
+) -> Literal["aprovado", "aguardando", "rejeitado"]:
+    """Só é chamado quando o Head está pra fechar um ticket com a label
+    `governanca-requer-aprovacao` (ou quando é acordado por um wake de approval nesse
+    mesmo ticket). Devolve o que fazer a seguir — não fecha nada sozinho."""
+    existente = await _obter_approval_governanca_mais_recente(client, issue_id)
+    if existente:
+        status = existente.get("status")
+        if status == "approved":
+            return "aprovado"
+        if status == "rejected":
+            return "rejeitado"
+        log.info("governanca_gate.ainda_pendente", issue=issue_id, status=status)
+        return "aguardando"  # pending / revision_requested — já existe, não duplica
+
+    head_id = await _encontrar_agente_id_por_slug(client, company_id, "head")
+    try:
+        await client.create_approval(
+            approval_type="request_board_approval",
+            payload={
+                "interestelarGate": GOVERNANCA_GATE_MARKER,
+                "issueId": issue_id,
+                "issueTitle": issue_data.get("title") or issue_id,
+            },
+            requested_by_agent_id=head_id,
+            issue_ids=[issue_id],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("governanca_gate.create_approval.failed", issue=issue_id, err=str(exc))
+        # Sem a approval criada não temos como saber quando desbloquear — mais seguro
+        # não fechar do que fechar sem o sign-off que a própria label pediu.
+        return "aguardando"
+    try:
+        await client.update_issue(issue_id, status="blocked", clear_assignee_agent=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("governanca_gate.block_issue.failed", issue=issue_id, err=str(exc))
+    try:
+        await client.add_comment(
+            issue_id,
+            body=(
+                "**Aguardando aprovação formal do Board.** Este ticket tem a label "
+                f"`{GOVERNANCA_APPROVAL_LABEL}` — antes de fechar como `done` é preciso "
+                "um humano aprovar pela aba **Approvals** do Paperclip.\n\n"
+                "Se for rejeitado: comente também aqui no ticket explicando o motivo — "
+                "hoje o Paperclip só acorda o Head automaticamente numa aprovação, não "
+                "numa rejeição, então um comentário aqui é o que garante que o Head "
+                "retome o ticket."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("comment.add.failed", issue=issue_id, err=str(exc))
+    return "aguardando"
+
+
+async def _rejeitar_gate_governanca(
+    client: PaperclipClient,
+    issue_id: str,
+    company_id: str,
+) -> None:
+    aprovacao = await _obter_approval_governanca_mais_recente(client, issue_id)
+    motivo = (aprovacao or {}).get("decisionNote") or "sem motivo detalhado na approval."
+    governanca_id = await _encontrar_agente_id_por_slug(client, company_id, "governanca")
+    try:
+        await client.add_comment(
+            issue_id,
+            body=(
+                f"**Aprovação do Board rejeitada.** Motivo: {motivo}\n\n"
+                "Devolvendo para a Governança revisar antes de tentar fechar de novo."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("comment.add.failed", issue=issue_id, err=str(exc))
+    if not governanca_id:
+        log.warning("governanca_gate.governanca_agent_not_found", issue=issue_id)
+        return
+    try:
+        await client.assign_issue(issue_id, agent_id=governanca_id)
+        await client.update_issue(issue_id, status="in_progress")
+    except Exception as exc:  # noqa: BLE001
+        log.error("governanca_gate.reassign_after_reject.failed", issue=issue_id, err=str(exc))
+
+
+async def _finalizar_ou_abrir_gate_governanca(
+    client: PaperclipClient,
+    issue_id: str,
+    issue_data: dict[str, Any],
+    comments_history: list[dict[str, Any]],
+    plan: list[str],
+    company_id: str,
+) -> None:
+    """Chamado em todo ponto onde o Head fecharia a demanda — decide se fecha de vez ou
+    se precisa abrir/checar o Approval Gate da Governança primeiro (ver bloco acima)."""
+    if not _tem_label_governanca(issue_data):
+        await _finalizar_como_head(client, issue_id, issue_data, comments_history, plan)
+        return
+    resultado = await _abrir_ou_verificar_gate_governanca(client, issue_id, issue_data, company_id)
+    if resultado == "aprovado":
+        await _finalizar_como_head(client, issue_id, issue_data, comments_history, plan)
+    elif resultado == "rejeitado":
+        await _rejeitar_gate_governanca(client, issue_id, company_id)
+    # "aguardando": _abrir_ou_verificar_gate_governanca já bloqueou/comentou (ou já
+    # tinha feito isso numa chamada anterior) — nada mais a fazer aqui.
+
+
 async def _process_demanda_agent(
     agent_slug: str,
     payload: HeartbeatPayload,
@@ -419,6 +605,27 @@ async def _process_demanda_agent(
         body = c.get("body") or ""
         history_tuples.append((autor, ts, body))
 
+    # Approval Gate da Governança (roadmap §5.2): Paperclip acorda automaticamente quem
+    # pediu a approval (`requestedByAgentId` = Head, ver _abrir_ou_verificar_gate_governanca)
+    # quando um humano aprova pela aba Approvals — `wakeReason=approval_approved`,
+    # `context.taskId` = este ticket. Trata aqui, sem chamar o LLM (a decisão já foi
+    # tomada por um humano, não há nada pro modelo "classificar" de novo).
+    if agent_slug == "head" and payload.context.wakeReason in ("approval_approved", "approval_rejected"):
+        log.info("head.approval_wake", issue=issue_id, wake_reason=payload.context.wakeReason)
+        resultado = await _abrir_ou_verificar_gate_governanca(client, issue_id, issue_data, company_id)
+        if resultado == "aprovado":
+            plano_fechamento = _descobrir_plano_do_historico(history_tuples, issue_data)
+            try:
+                await _finalizar_como_head(client, issue_id, issue_data, raw_comments, plano_fechamento)
+            except Exception as exc:  # noqa: BLE001
+                log.error("head.fechamento.falhou", issue=issue_id, err=str(exc))
+        elif resultado == "rejeitado":
+            await _rejeitar_gate_governanca(client, issue_id, company_id)
+        # "aguardando" não deveria acontecer aqui (só faria sentido se a approval ainda
+        # estivesse pending mesmo depois de um wake de approval resolvida) — nada a fazer
+        # além do log já emitido dentro de _abrir_ou_verificar_gate_governanca.
+        return
+
     pattern_md = await _carregar_padrao_do_contexto(issue_data)
     state = await mem.obter_estado_revisoes(issue_id)
     metadata = issue_data.get("metadata") or {}
@@ -469,13 +676,7 @@ async def _process_demanda_agent(
         # não viu seu próprio #PLANO: anterior e fechou o ticket sem rotear pra ninguém).
         # _extract_plan_from_text só "acerta" se o texto tiver uma linha #PLANO: válida
         # com slugs de agente reais — isso já é filtro suficiente contra falso positivo.
-        for _autor_nome, _ts, corpo in history_tuples:
-            plano_detectado = _extract_plan_from_text(corpo)
-            if plano_detectado:
-                plan = plano_detectado
-                break
-        if not plan and issue_data.get("description"):
-            plan = _extract_plan_from_text(issue_data["description"]) or []
+        plan = _descobrir_plano_do_historico(history_tuples, issue_data)
 
     state_fresh = await mem.obter_estado_revisoes(issue_id)
     comentario_contadores = await _montar_comentario_contadores(issue_id, state_fresh)
@@ -564,7 +765,9 @@ async def _process_demanda_agent(
 
     if agent_slug == "head" and proximo_slug is None and (output.stage_complete or not plan):
         try:
-            await _finalizar_como_head(client, issue_id, issue_data, raw_comments, plan or [])
+            await _finalizar_ou_abrir_gate_governanca(
+                client, issue_id, issue_data, raw_comments, plan or [], company_id
+            )
         except Exception as exc:  # noqa: BLE001
             log.error("head.fechamento.falhou", issue=issue_id, err=str(exc))
         return
@@ -576,7 +779,9 @@ async def _process_demanda_agent(
             ultimo_esperado = plan[-1]
             if agent_slug == ultimo_esperado:
                 try:
-                    await _finalizar_como_head(client, issue_id, issue_data, raw_comments, plan)
+                    await _finalizar_ou_abrir_gate_governanca(
+                        client, issue_id, issue_data, raw_comments, plan, company_id
+                    )
                 except Exception as exc:  # noqa: BLE001
                     log.error("head.fechamento.falhou", issue=issue_id, err=str(exc))
                 return

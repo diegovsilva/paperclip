@@ -545,7 +545,7 @@ corretamente, "testar conexão" funciona com a chave Groq real.
 - **Fase 7 — caso restante:** disparo da routine semanal (a routine foi criada com sucesso, mas seu disparo automático no horário marcado — segunda 03:00 UTC — ainda não foi observado; exige o scheduler nativo do Paperclip rodando de verdade por tempo suficiente).
 - **Ajuste menor opcional:** Head de Dados, ao acordar o primeiro heartbeat, chamar automaticamente `tools_repo.obter_ou_gerar_padrao_e_escrever_vault(...)` se metadata do ticket tiver `repo_url` e anexar resultado na descrição do ticket para os próximos agentes consumirem direto.
 - **Fase 6 opcional:** Badge "Revisão N/3" no IssueRow do UI, botão "Aprovar Skill" em CommentThread.
-- **Governança como Approval Gate:** após MVP rodar; configurar approval do Paperclip que requer ação do agente Governança antes de `done` (§5.2 roadmap).
+- ~~**Governança como Approval Gate**~~ **Feito em 2026-08-18** — ver seção abaixo.
 
 ### 2026-08-18 — Auth HTTP Basic na página `/config`
 
@@ -676,3 +676,76 @@ pegadinha de ambiente de teste ad-hoc; documentado aqui porque quem for rodar
 
 **Suíte completa**: **60 passed** (52 anteriores + 3 do Curador + 5 do fallback de
 repo), rodada via Docker (`python:3.12-slim` + `git` instalado), zero regressão.
+
+### 2026-08-18 — Governança como Approval Gate (§5.2 do roadmap)
+
+Quinto e último item da sessão. Antes de implementar, investiguei o mecanismo nativo
+de approvals do core (o roadmap só linkava os arquivos, sem confirmar o contrato — mesmo
+padrão de risco já visto antes) e achei duas discrepâncias reais entre o que o roadmap
+assumia e o que o código faz:
+
+1. **`type` é um enum FECHADO** (`APPROVAL_TYPES` em `packages/shared/src/constants.ts`):
+   só `hire_agent` / `approve_ceo_strategy` / `budget_override_required` /
+   `request_board_approval`. Não dá pra criar um tipo próprio "governanca_sign_off" — o
+   Zod rejeitaria com 400. Usamos `request_board_approval` (o único genérico o
+   bastante) com um marcador dentro do `payload` (`interestelarGate:
+   "governanca_sign_off"`) pra distinguir esta approval de qualquer outra da empresa.
+2. **Só um humano autenticado como Board resolve** — `POST /approvals/:id/approve` e
+   `/reject` chamam `assertBoard(req)`, que exige `req.actor.type === "board"`. Nenhum
+   agente "auto-aprova" via API, mesmo a Board API key do harness sendo usada em toda
+   outra chamada do Interestelar. Perguntei ao Diego antes de implementar — confirmado:
+   queremos o gate de verdade (fricção manual real), não uma automação disfarçada de
+   approval. Achado bônus: **aprovar acorda automaticamente** quem pediu a approval
+   (`heartbeat.wakeup(approval.requestedByAgentId, ...)`, `wakeReason:
+   "approval_approved"`) — mas **rejeitar não acorda ninguém** (sem chamada de wakeup
+   nesse handler). Documentado e mitigado pedindo, no próprio comentário do gate, que o
+   humano também comente no ticket original se for rejeitar (isso aciona o wake
+   genérico `issue_commented` que o Head já trata).
+
+**[harness/paperclip_client.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/harness/paperclip_client.py)**
+— dois métodos novos: `create_approval` (`POST /companies/:id/approvals`) e
+`list_issue_approvals` (`GET /issues/:id/approvals`).
+
+**[harness/webhook.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/harness/webhook.py)** —
+seção "Approval Gate da Governança":
+- `GOVERNANCA_APPROVAL_LABEL = "governanca-requer-aprovacao"` — tickets com esta label
+  não fecham como `done` sozinhos.
+- `_tem_label_governanca` / `_obter_approval_governanca_mais_recente` (por `createdAt`,
+  pode haver mais de uma no tempo — uma rejeitada, uma nova após retrabalho).
+- `_abrir_ou_verificar_gate_governanca` — sem approval ainda: cria uma
+  (`requestedByAgentId` = Head), bloqueia o ticket (`status: blocked`,
+  `clear_assignee_agent`) e comenta pedindo aprovação pela aba Approvals. Já existe e
+  pending: não duplica nada, só espera. Aprovada/rejeitada: devolve o veredito pro
+  chamador decidir.
+- `_finalizar_ou_abrir_gate_governanca` — novo ponto único por onde TODO fechamento do
+  Head passa a partir de agora (substituiu as duas chamadas diretas a
+  `_finalizar_como_head`): sem a label, fecha normal (zero mudança de comportamento
+  pros tickets de sempre); com a label, decide entre fechar/abrir gate/devolver.
+- Tratamento de `wakeReason in ("approval_approved", "approval_rejected")` no início de
+  `_process_demanda_agent` pro Head — não chama o LLM (a decisão já foi tomada por um
+  humano), só confirma o status da approval e finaliza ou devolve pra Governança com o
+  `decisionNote` como motivo.
+- `_descobrir_plano_do_historico` extraído do bloco que já existia (fallback de
+  `#PLANO:` via comentários/description) — reutilizado tanto pelo fluxo normal quanto
+  pelo wake de approval, que não tem `output.plan` porque não chamou o LLM.
+
+**[scripts/setup_paperclip.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/scripts/setup_paperclip.py)**
+— nova label `governanca-requer-aprovacao` (vermelha `#dc2626`) criada junto com
+`Interestelar`/`LGPD`, pra não depender de alguém criar na mão.
+
+**Testes**: 5 novos em `tests/test_webhook_flow_e2e.py` (usando ids de ticket próprios
+por teste — `issue-gate-N` — pra não somar heartbeats no contador compartilhado de
+`ISSUE_ID` e trombar com o cap da proteção de loop, que já estava perto do limite só
+com os testes anteriores do arquivo):
+- Ticket com a label bloqueia o fechamento e cria a approval corretamente.
+- Approval ainda pending não duplica approval nem comentário num segundo acorda.
+- Wake `approval_approved` fecha o ticket de verdade sem chamar o LLM.
+- Wake `approval_rejected` devolve pra Governança com o motivo no comentário.
+- Regressão: ticket sem a label continua fechando normal (nenhuma approval criada).
+
+**Suíte completa**: **65 passed** (60 anteriores + 5 novos), via Docker
+(`python:3.12-slim` + `git`), zero regressão.
+
+**Ainda não validado**: uma aprovação/rejeição de verdade clicada na UI do Paperclip
+contra uma instância real — só coberto por teste com mocks (mesma situação de todo o
+resto do harness que depende de heartbeat nativo do core).

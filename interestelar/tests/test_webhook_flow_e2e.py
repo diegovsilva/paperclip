@@ -34,6 +34,7 @@ class FakeClient:
             "status": "todo",
             "priority": "medium",
             "metadata": {},
+            "labels": [],
         }
         self.comments: list[dict] = []
         self.agents = [
@@ -45,9 +46,10 @@ class FakeClient:
         self.callbacks: list[tuple] = []
         self.update_issue_calls: list[dict] = []
         self.current_author_slug: str = "head"
+        self.approvals: list[dict] = []
 
     async def get_issue(self, issue_id: str) -> dict:
-        assert issue_id == ISSUE_ID
+        assert issue_id == self.issue["id"]
         return dict(self.issue)
 
     async def list_comments(self, issue_id: str, limit: int = 100) -> list[dict]:
@@ -93,12 +95,44 @@ class FakeClient:
         self.callbacks.append((run_id, status_, result))
         return {}
 
+    async def create_approval(
+        self,
+        approval_type: str,
+        payload: dict,
+        requested_by_agent_id: str | None = None,
+        issue_ids: list[str] | None = None,
+        company_id: str | None = None,
+    ) -> dict:
+        approval = {
+            "id": f"approval-{len(self.approvals) + 1}",
+            "type": approval_type,
+            "payload": payload,
+            "requestedByAgentId": requested_by_agent_id,
+            "status": "pending",
+            "decisionNote": None,
+            "createdAt": f"2026-08-18T00:00:{len(self.approvals):02d}Z",
+            "_issueIds": list(issue_ids or []),
+        }
+        self.approvals.append(approval)
+        return approval
+
+    async def list_issue_approvals(self, issue_id: str) -> list[dict]:
+        return [a for a in self.approvals if issue_id in a.get("_issueIds", [])]
+
 
 def _agent_id_for(slug: str) -> str:
     return f"agent-{slug}"
 
 
-async def _run_heartbeat(monkeypatch, client: FakeClient, agent_slug: str, output: AgentOutput, run_id: str):
+async def _run_heartbeat(
+    monkeypatch,
+    client: FakeClient,
+    agent_slug: str,
+    output: AgentOutput,
+    run_id: str,
+    issue_id: str = ISSUE_ID,
+    wake_reason: str = "assigned",
+):
     from harness import webhook as wh
 
     client.current_author_slug = agent_slug
@@ -112,7 +146,7 @@ async def _run_heartbeat(monkeypatch, client: FakeClient, agent_slug: str, outpu
         runId=run_id,
         agentId=_agent_id_for(agent_slug),
         companyId=COMPANY_ID,
-        context=HeartbeatContext(taskId=ISSUE_ID, wakeReason="assigned"),
+        context=HeartbeatContext(taskId=issue_id, wakeReason=wake_reason),
     )
     await wh._process_agent_webhook(agent_slug, payload, client)
 
@@ -201,6 +235,164 @@ async def test_extract_plan_from_text_exclui_head():
     texto = "#PLANO: HEAD → PO → ENGENHEIRO → HEAD (final)\nETAPA_CONCLUIDA\n"
     plano = _extract_plan_from_text(texto)
     assert plano == ["po", "engenheiro"]
+
+
+async def test_gate_governanca_bloqueia_fechamento_e_cria_approval(isolated_settings, monkeypatch):
+    """Ticket com a label `governanca-requer-aprovacao` não fecha como `done` quando o
+    plano termina — cria uma approval nativa (request_board_approval, marcada com
+    interestelarGate) e bloqueia o ticket esperando um humano decidir pela aba
+    Approvals."""
+    gate_issue_id = "issue-gate-1"  # id próprio: não compartilha contador de loop com ISSUE_ID
+    client = FakeClient()
+    client.issue["id"] = gate_issue_id
+    client.issue["labels"] = [{"id": "l1", "name": "governanca-requer-aprovacao", "color": "#dc2626"}]
+    client.issue["assigneeAgentId"] = _agent_id_for("governanca")
+
+    governanca_out = AgentOutput(
+        raw_text="Inventário de dados pessoais ok. APROVADO.\nETAPA_CONCLUIDA\n",
+        stage_complete=True,
+        plan=["governanca"],
+    )
+    await _run_heartbeat(monkeypatch, client, "governanca", governanca_out, "run-gate-1", issue_id=gate_issue_id)
+
+    assert client.issue["status"] == "blocked"
+    assert client.issue["assigneeAgentId"] is None
+    assert len(client.approvals) == 1
+    approval = client.approvals[0]
+    assert approval["type"] == "request_board_approval"
+    assert approval["payload"]["interestelarGate"] == "governanca_sign_off"
+    assert approval["requestedByAgentId"] == _agent_id_for("head")
+    # Não fechou de verdade: nenhum work product/attachment do fechamento foi criado.
+    assert client.work_products == []
+    assert client.attachments == []
+    assert any("Approvals" in c["body"] for c in client.comments)
+
+
+async def test_gate_governanca_pendente_nao_duplica_approval_nem_comentario(isolated_settings):
+    """Head sendo acordado de novo enquanto a approval ainda está pending (ex.: um
+    heartbeat de qualquer outro motivo) não deveria abrir uma segunda approval nem
+    comentar de novo — só espera."""
+    from harness import webhook as wh
+
+    gate_issue_id = "issue-gate-2"
+    client = FakeClient()
+    client.issue["id"] = gate_issue_id
+    client.issue["labels"] = [{"id": "l1", "name": "governanca-requer-aprovacao"}]
+
+    await wh._finalizar_ou_abrir_gate_governanca(
+        client, gate_issue_id, client.issue, [], ["governanca"], COMPANY_ID
+    )
+    assert len(client.approvals) == 1
+    assert len(client.comments) == 1
+
+    await wh._finalizar_ou_abrir_gate_governanca(
+        client, gate_issue_id, client.issue, [], ["governanca"], COMPANY_ID
+    )
+    assert len(client.approvals) == 1, "não deveria criar uma segunda approval"
+    assert len(client.comments) == 1, "não deveria comentar de novo enquanto ainda pending"
+
+
+async def test_gate_governanca_aprovado_fecha_o_ticket_via_wake(isolated_settings, monkeypatch):
+    """Paperclip acorda automaticamente quem pediu a approval (`requestedByAgentId` =
+    Head) quando um humano aprova pela aba Approvals — `wakeReason=approval_approved`.
+    O Head não deveria chamar o LLM pra isso, só confirmar e fechar."""
+    from harness import webhook as wh
+
+    gate_issue_id = "issue-gate-3"
+    client = FakeClient()
+    client.issue["id"] = gate_issue_id
+    client.issue["labels"] = [{"id": "l1", "name": "governanca-requer-aprovacao"}]
+    client.issue["status"] = "blocked"
+    client.issue["assigneeAgentId"] = None
+    client.approvals.append(
+        {
+            "id": "approval-1",
+            "type": "request_board_approval",
+            "payload": {"interestelarGate": "governanca_sign_off"},
+            "requestedByAgentId": _agent_id_for("head"),
+            "status": "approved",
+            "decisionNote": "Aprovado, pode seguir.",
+            "createdAt": "2026-08-18T00:00:00Z",
+            "_issueIds": [gate_issue_id],
+        }
+    )
+
+    chamou_llm = False
+
+    async def _fake_executar_agente(inp):
+        nonlocal chamou_llm
+        chamou_llm = True
+        return AgentOutput(raw_text="não deveria rodar", stage_complete=True)
+
+    monkeypatch.setattr(wh, "executar_agente", _fake_executar_agente)
+
+    payload = HeartbeatPayload(
+        runId="run-gate-approved",
+        agentId=_agent_id_for("head"),
+        companyId=COMPANY_ID,
+        context=HeartbeatContext(taskId=gate_issue_id, wakeReason="approval_approved"),
+    )
+    await wh._process_agent_webhook("head", payload, client)
+
+    assert chamou_llm is False
+    assert client.issue["status"] == "done"
+    assert len(client.work_products) == 1
+
+
+async def test_gate_governanca_rejeitado_via_wake_volta_pra_governanca(isolated_settings, monkeypatch):
+    """Rejeitar NÃO acorda ninguém nativamente (confirmado lendo o core — só approve
+    dispara heartbeat.wakeup) — mas se o Head for acordado por qualquer outro motivo
+    (ex.: o humano também comentou no ticket, como o próprio gate já instrui a fazer),
+    ele precisa reconhecer a rejeição e devolver pra Governança, não fechar."""
+    from harness import webhook as wh
+
+    gate_issue_id = "issue-gate-4"
+    client = FakeClient()
+    client.issue["id"] = gate_issue_id
+    client.issue["labels"] = [{"id": "l1", "name": "governanca-requer-aprovacao"}]
+    client.issue["status"] = "blocked"
+    client.approvals.append(
+        {
+            "id": "approval-1",
+            "type": "request_board_approval",
+            "payload": {"interestelarGate": "governanca_sign_off"},
+            "requestedByAgentId": _agent_id_for("head"),
+            "status": "rejected",
+            "decisionNote": "Falta anonimizar CPF antes de fechar.",
+            "createdAt": "2026-08-18T00:00:00Z",
+            "_issueIds": [gate_issue_id],
+        }
+    )
+
+    payload = HeartbeatPayload(
+        runId="run-gate-rejected",
+        agentId=_agent_id_for("head"),
+        companyId=COMPANY_ID,
+        context=HeartbeatContext(taskId=gate_issue_id, wakeReason="approval_rejected"),
+    )
+    await wh._process_agent_webhook("head", payload, client)
+
+    assert client.issue["assigneeAgentId"] == _agent_id_for("governanca")
+    assert client.issue["status"] == "in_progress"
+    assert any("Falta anonimizar CPF antes de fechar." in c["body"] for c in client.comments)
+
+
+async def test_ticket_sem_label_governanca_fecha_normal_sem_gate(isolated_settings, monkeypatch):
+    """Regressão: tickets sem a label continuam fechando exatamente como antes — o
+    gate não interfere no caminho comum."""
+    gate_issue_id = "issue-gate-5"
+    client = FakeClient()
+    client.issue["id"] = gate_issue_id
+
+    governanca_out = AgentOutput(
+        raw_text="Tudo certo, sem dado sensível.\nETAPA_CONCLUIDA\n",
+        stage_complete=True,
+        plan=["governanca"],
+    )
+    await _run_heartbeat(monkeypatch, client, "governanca", governanca_out, "run-no-gate", issue_id=gate_issue_id)
+
+    assert client.issue["status"] == "done"
+    assert client.approvals == []
 
 
 async def test_heartbeat_obsoleto_e_ignorado_sem_chamar_llm(isolated_settings, monkeypatch):

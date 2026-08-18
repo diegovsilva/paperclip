@@ -96,9 +96,14 @@ recria o harness pra carregar. Não precisa copiar/colar nada.
 
 Roda `scripts/setup_paperclip.py` dentro do container: cria a company (ou reaproveita
 uma existente pelo nome), os 7 agentes (Head, PO, Arquiteto, Engenheiro, Governança,
-Analista, Curador de Skills) com o org chart certo, o projeto "Demandas de Dados", 2
-labels, as 6 skills, e a routine semanal do Curador. É idempotente — rodar de novo não
-duplica nada.
+Analista, Curador de Skills) com o org chart certo, o projeto "Demandas de Dados", 3
+labels (`Interestelar`, `LGPD`, `governanca-requer-aprovacao`), as 6 skills, e a
+routine semanal do Curador. É idempotente — rodar de novo não duplica nada.
+
+Coloque a label `governanca-requer-aprovacao` num ticket pra exigir que um humano
+aprove pela aba **Approvals** do Paperclip antes dele fechar como `done` — mesmo depois
+da Governança concluir sua revisão (ver "Approval Gate" em
+[doc/plans/2026-08-14-interestelar-progresso.md](../doc/plans/2026-08-14-interestelar-progresso.md)).
 
 ### 5. Escolher o provider de LLM
 
@@ -236,14 +241,18 @@ em Configurações avançadas no painel.
 
 ## O que ainda não está pronto
 
-- **Autenticação no painel `/config`** — hoje aberto, sem senha.
-- **Curador de Skills** — o ciclo semanal nunca rodou de ponta a ponta contra fontes
-  externas reais (só testado com mocks).
-- **Tickets automáticos do Paperclip** ("Review productivity for X", "Recover stalled
-  issue for X") — o Head ainda não reconhece esses títulos como especiais; trata como
-  demanda normal.
-- **Fase 6 (opcional)** — badges de UI no core do Paperclip (Revisão N/3, botão Aprovar
-  Skill) não foram feitos.
+- **Disparo real da routine semanal do Curador** — a routine + trigger cron são criados
+  com sucesso pelo setup, mas o disparo automático no horário marcado (segunda 03:00
+  UTC) nunca foi observado ao vivo (o ciclo em si — fonte externa → proposta →
+  aprovação — já está coberto por teste de ponta a ponta com mocks).
+- **Fechar um ticket real do início ao fim sem cancelar** — o fluxo completo (vault +
+  work product + `done`) só foi observado com testes automatizados; nenhum ticket real
+  chegou a ser fechado por completo sem intervenção manual no meio.
+- **Fase 6 (opcional)** — histórico de demandas na própria página, badge "Revisão N/3"
+  por ticket, log ao vivo (WebSocket/SSE) dos heartbeats.
+- **Approval Gate da Governança** — implementado (label `governanca-requer-aprovacao`
+  bloqueia o fechamento até um humano aprovar pela aba Approvals do Paperclip), mas só
+  testado com mocks — nunca exercitado contra uma aprovação real clicada na UI.
 
 Histórico completo de decisões, bugs encontrados e como foram corrigidos:
 [doc/plans/2026-08-14-interestelar-progresso.md](../doc/plans/2026-08-14-interestelar-progresso.md).
