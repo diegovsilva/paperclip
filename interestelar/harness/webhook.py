@@ -963,16 +963,35 @@ async def _process_agent_webhook(
         # próprio aviso de loop (confirmado ao vivo: o mesmo aviso postado dezenas de
         # vezes seguidas). Desatribuir primeiro garante que não sobra ninguém pra
         # Paperclip acordar depois deste comentário.
+        #
+        # priority="critical" (pedido explícito do Diego, 2026-08-18, depois de um
+        # ticket real travar por rate limit da Groq sem ninguém perceber na hora):
+        # garante que o ticket sobe pro topo de qualquer visão do board ordenada por
+        # prioridade — hoje é o sinal mais visível que dá pra dar sem depender de
+        # canal externo (Slack/e-mail ainda não configurados, ver workflows/README.md
+        # do repo raiz). "critical" é o valor mais alto de verdade — o enum real do
+        # core é critical/high/medium/low, NÃO tem "urgent" (achado ao vivo: um
+        # primeiro rascunho deste fix usava "urgent" e o PATCH voltava 422 Validation
+        # error; corrigido aqui e no Literal `IssuePriority` do paperclip_client.py).
         try:
-            await client.update_issue(issue_id, status="blocked", clear_assignee_agent=True)
+            await client.update_issue(
+                issue_id, status="blocked", priority="critical", clear_assignee_agent=True
+            )
         except Exception as exc:  # noqa: BLE001
             log.error("loop.unassign.failed", issue=issue_id, err=str(exc))
         try:
             await client.add_comment(
                 issue_id,
-                "**Atenção:** loop de revisões detectado e interrompido automaticamente. "
-                "Ticket desatribuído e marcado como bloqueado — requer decisão humana "
-                "(reatribuir manualmente para um agente) para prosseguir.",
+                "🚨 **ALERTA CRÍTICO — loop de revisões detectado e interrompido automaticamente.**\n\n"
+                "Ticket desatribuído, marcado como **bloqueado** e prioridade elevada pra "
+                "**crítica** — requer decisão humana antes de continuar.\n\n"
+                "**Causa mais comum:** o provider de LLM configurado recusou uma ou mais "
+                "chamadas (rate limit / TPM excedido — comum no tier grátis da Groq com "
+                "prompts grandes) e os heartbeats de retry se empilharam até estourar o "
+                "limite de proteção de loop. Confira os comentários anteriores deste "
+                "ticket procurando por `Erro do modelo LLM` antes de reatribuir.\n\n"
+                "**Para retomar:** reatribua manualmente pra um agente (ou troque/ajuste "
+                "o provider de LLM em `/config` se o motivo for rate limit).",
             )
         except Exception:  # noqa: BLE001
             pass

@@ -545,8 +545,13 @@ async def test_loop_protection_desatribui_antes_de_comentar(isolated_settings, m
 
     assert client.issue["assigneeAgentId"] is None, "loop protection precisa desatribuir o ticket"
     assert client.issue.get("status") == "blocked"
+    # Pedido do Diego (2026-08-18): prioridade crítica como alerta bem visível no
+    # board, já que ainda não há canal externo (Slack/e-mail) configurado. O enum
+    # real do core é critical/high/medium/low — não existe "urgent".
+    assert client.issue.get("priority") == "critical"
     assert len(client.comments) == 1
     assert "loop" in client.comments[0]["body"].lower()
+    assert "alerta crítico" in client.comments[0]["body"].lower()
     # a desatribuição precisa ter acontecido ANTES do comentário
     unassign_calls = [c for c in client.update_issue_calls if c.get("clear_assignee_agent")]
     assert len(unassign_calls) == 1

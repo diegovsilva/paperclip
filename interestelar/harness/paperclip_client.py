@@ -15,7 +15,12 @@ log = setup_logging()
 IssueStatus = Literal[
     "backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"
 ]
-IssuePriority = Literal["low", "medium", "high", "urgent"]
+# Precisa bater exatamente com ISSUE_PRIORITIES em packages/shared/src/constants.ts —
+# achado ao vivo em 2026-08-18: "urgent" (o que este alias dizia antes) não existe;
+# o valor real mais alto é "critical". O Zod real rejeita qualquer valor fora da lista
+# com 422, então este Literal errado deixaria passar um `priority="urgent"` no
+# type-check só pra falhar em runtime contra o core de verdade.
+IssuePriority = Literal["low", "medium", "high", "critical"]
 # Precisa bater exatamente com AGENT_ROLES em packages/shared/src/constants.ts —
 # o Zod schema (createAgentSchema) rejeita (400) qualquer valor fora desta lista.
 AgentRole = Literal[
