@@ -16,7 +16,7 @@
 | 4 — Fluxo de demanda & harness de revisão | Concluída | engine_prompt.py (monta prompt + chama Groq com retry), webhook.py (v0.2 — Head roteamento, agente genérico, atribuição automática, fechamento Head, contadores de revisão, loop protection duplo) | 2026-08-14 |
 | 5 — Integração Paperclip (setup script) | Concluída e validada contra o real | scripts/setup_paperclip.py rodado com sucesso (100% HTTP 200/201) contra Paperclip real: company + 7 agentes + projeto + 2 labels + 6 skills + routine/trigger | 2026-08-17 |
 | 6 — UI opcional | Em andamento — auth da página `/config` feita | `harness/auth.py` (HTTP Basic, banco>env, desligada por padrão), seção "Segurança" na página, 6 testes novos | 2026-08-18 |
-| 7 — Testes ponta-a-ponta | MVP validado de ponta a ponta contra ambiente real, incidente real corrigido | 30 testes automatizados (pytest); 9 bugs de contrato de API + 2 bugs de roteamento + 3 bugs de concorrência corrigidos (incl. loop do próprio aviso de loop, achado em produção); provider de LLM dinâmico (`harness/llm_client.py`, Groq/OpenAI/Anthropic); `start.sh`/`start.ps1` criados; `docker compose` + bootstrap + `setup_paperclip.py` + fluxo de demanda, tudo validado contra o Paperclip real rodando. | 2026-08-17 |
+| 7 — Testes ponta-a-ponta | MVP validado contra ambiente real; só o disparo da routine semanal ainda não foi observado ao vivo | 60 testes automatizados (pytest); 9 bugs de contrato de API + 2 bugs de roteamento + 3 bugs de concorrência + tickets internos do Paperclip reconhecidos + Curador de Skills/fallback GitHub cobertos; provider de LLM dinâmico; auth HTTP Basic no `/config`; `docker compose` + bootstrap + `setup_paperclip.py` + fluxo de demanda, tudo validado contra o Paperclip real rodando. | 2026-08-18 |
 
 ---
 
@@ -541,7 +541,8 @@ corretamente, "testar conexão" funciona com a chave Groq real.
 - **Ideias de UX que ainda faltam** (não implementadas, só anotadas): histórico de demandas/tickets processados direto na página; indicador visual de "revisão N/3" por ticket ativo; log ao vivo (WebSocket/SSE) dos heartbeats em vez de só nos logs do container.
 - ~~**Investigar mais a fundo os tickets auto-gerados pelo Paperclip**~~ **Feito em 2026-08-18** — ver seção abaixo.
 - **Opcional:** rodar um ticket real do início ao fim sem cancelar, pra ver o fechamento completo (vault + work product + `done`) — ainda não observado ao vivo, só coberto pelo teste automatizado com mock.
-- **Fase 7 — casos restantes:** Curador de Skills fluxo completo, fallback GitHub API, disparo da routine semanal (a routine foi criada com sucesso, mas seu disparo automático no horário marcado — segunda 03:00 UTC — ainda não foi observado).
+- ~~**Fase 7 — Curador de Skills fluxo completo, fallback GitHub API**~~ **Feito em 2026-08-18** — ver seção abaixo.
+- **Fase 7 — caso restante:** disparo da routine semanal (a routine foi criada com sucesso, mas seu disparo automático no horário marcado — segunda 03:00 UTC — ainda não foi observado; exige o scheduler nativo do Paperclip rodando de verdade por tempo suficiente).
 - **Ajuste menor opcional:** Head de Dados, ao acordar o primeiro heartbeat, chamar automaticamente `tools_repo.obter_ou_gerar_padrao_e_escrever_vault(...)` se metadata do ticket tiver `repo_url` e anexar resultado na descrição do ticket para os próximos agentes consumirem direto.
 - **Fase 6 opcional:** Badge "Revisão N/3" no IssueRow do UI, botão "Aprovar Skill" em CommentThread.
 - **Governança como Approval Gate:** após MVP rodar; configurar approval do Paperclip que requer ação do agente Governança antes de `done` (§5.2 roadmap).
@@ -632,3 +633,46 @@ interno não chama o LLM, desatribui antes de comentar, e não mexe no status; e
 teste de não-regressão confirmando que um ticket normal (sem `originKind` reconhecido)
 continua passando pelo pipeline normalmente. Suíte completa via Docker
 (`python:3.12-slim`): **52 passed** (50 anteriores + 2 novos), zero regressão.
+
+### 2026-08-18 — Fase 7: Curador de Skills fluxo completo + fallback GitHub API
+
+Terceiro item da sessão: os dois casos de teste que o roadmap (§7, "Ainda faltando na
+Fase 7") explicitamente apontava como não cobertos.
+
+**[tests/test_tools_skill_curator.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/tests/test_tools_skill_curator.py)
+(3 testes)** — `_download_url` e `llm_client.chat_completion` mockados, `PaperclipClient`
+substituído por um `FakeClient` em memória (só `create_issue`), `skills/` e
+`skills_pendentes/` isoladas em `tmp_path`:
+- Ciclo completo: fonte mockada → hash novo (≠ último aprovado) → chama o LLM → salva
+  `skills_pendentes/<nome>/SKILL.md` → registra a proposta → abre ticket no Paperclip
+  com o diff unificado completo e o link `POST /aprovar-skill/<nome>` na descrição. A
+  skill em `skills/` (aprovada) não é tocada.
+- Mesmo hash da fonte já aprovada → não chama o LLM, não abre ticket, não salva
+  pendente (idempotência da curadoria).
+- **Ponta a ponta** (o caso exato pedido no roadmap): fonte mockada → `skills_pendentes/`
+  → `POST /aprovar-skill/{nome}` via `TestClient` → promovida pra `skills/` → hash
+  marcado como aprovado no `skill_curadoria_log` → rodar o ciclo de novo com a mesma
+  fonte não repropõe.
+
+**[tests/test_tools_repo.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/tests/test_tools_repo.py)
+(5 testes)** — `_github_tree_snapshot`, `_gitlab_tree_snapshot`, `garantir_repo_local`
+e `_groq_pattern_from_snapshot` mockados (sem GitHub/GitLab/Groq/git reais):
+- Estratégia padrão tenta `github_api` primeiro e para aí quando funciona (não toca
+  gitlab/local).
+- `_github_tree_snapshot` devolvendo `None` (repo não encontrado, rate limit, token
+  inválido, ...) cai pra `gitlab_api` sem levantar erro.
+- Falhando GitHub e GitLab, cai pro clone local + snapshot de arquivos + Groq
+  (`local_groq`).
+- Cache válido (TTL não expirado) não toca em nenhuma das três estratégias.
+- Todas as estratégias falhando levanta `RuntimeError` claro (não trava nem falha
+  silenciosamente).
+
+**Achado ao rodar pela primeira vez**: `tools_repo.py` importa `GitPython`, que por sua
+vez exige o binário `git` disponível no `PATH` — falha no import (não no teste em si)
+dentro de uma imagem `python:3.12-slim` "pura" sem `git` instalado. Não é bug do
+projeto (o `Dockerfile` real já instala `git` via `apt-get`, ver Fase 0) — só uma
+pegadinha de ambiente de teste ad-hoc; documentado aqui porque quem for rodar
+`pytest` fora do Docker do projeto (ou num container minimalista) vai bater nisso.
+
+**Suíte completa**: **60 passed** (52 anteriores + 3 do Curador + 5 do fallback de
+repo), rodada via Docker (`python:3.12-slim` + `git` instalado), zero regressão.
