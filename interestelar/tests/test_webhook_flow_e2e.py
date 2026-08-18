@@ -448,6 +448,7 @@ async def test_loop_protection_desatribui_antes_de_comentar(isolated_settings, m
     loop_issue_id = "issue-loop-protection-test"
 
     client = FakeClient()
+    client.issue["id"] = loop_issue_id
     client.issue["assigneeAgentId"] = _agent_id_for("head")
     client.issue["status"] = "in_progress"
 
@@ -472,6 +473,54 @@ async def test_loop_protection_desatribui_antes_de_comentar(isolated_settings, m
     # a desatribuição precisa ter acontecido ANTES do comentário
     unassign_calls = [c for c in client.update_issue_calls if c.get("clear_assignee_agent")]
     assert len(unassign_calls) == 1
+
+
+async def test_loop_protection_concorrente_no_mesmo_ticket_comenta_uma_vez_so(isolated_settings):
+    """Regressão de um incidente real (rodando ao vivo em 2026-08-18, sob rate limit
+    de verdade da Groq empilhando heartbeats): dois heartbeats concorrentes pro mesmo
+    ticket, cada um vendo o cap de loop excedido, postaram o MESMO aviso separadamente
+    (duas vezes em <500ms). O lock por issue passou a envolver também a checagem da
+    proteção de loop (antes só envolvia _process_demanda_agent) — mas isso por si só
+    só serializa as chamadas, não impede a segunda de tripar de novo (o deque de
+    heartbeats não é resetado ao tripar). O fix real é a checagem de idempotência:
+    antes de comentar, confere se o ticket já está sem assignee e bloqueado — se sim,
+    foi uma chamada anterior (garantido pelo lock, não uma concorrente) que já tripou,
+    e esta simplesmente desiste sem comentar de novo."""
+    import asyncio
+    import time
+
+    from harness import webhook as wh
+    from harness.config import get_settings
+
+    loop_issue_id = "issue-loop-concurrent-test"
+    client = FakeClient()
+    client.issue["id"] = loop_issue_id
+    client.issue["assigneeAgentId"] = _agent_id_for("head")
+    client.issue["status"] = "in_progress"
+
+    cap = get_settings().hard_loop_heartbeat_cap
+    now = time.time()
+    wh._heartbeat_timestamps[loop_issue_id].extend([now] * cap)
+
+    def _payload(run_id: str) -> HeartbeatPayload:
+        return HeartbeatPayload(
+            runId=run_id,
+            agentId=_agent_id_for("head"),
+            companyId=COMPANY_ID,
+            context=HeartbeatContext(taskId=loop_issue_id, wakeReason="issue_commented"),
+        )
+
+    await asyncio.gather(
+        wh._process_agent_webhook("head", _payload("run-loop-concurrent-a"), client),
+        wh._process_agent_webhook("head", _payload("run-loop-concurrent-b"), client),
+    )
+
+    assert client.issue["assigneeAgentId"] is None
+    assert client.issue["status"] == "blocked"
+    avisos = [c for c in client.comments if "loop de revis" in c["body"].lower()]
+    assert len(avisos) == 1, f"esperava exatamente 1 aviso de loop, vieram {len(avisos)}"
+    unassign_calls = [c for c in client.update_issue_calls if c.get("clear_assignee_agent")]
+    assert len(unassign_calls) == 1, "desatribuir também deveria acontecer só uma vez"
 
 
 async def test_head_ignora_ticket_interno_do_paperclip_sem_chamar_llm(isolated_settings, monkeypatch):

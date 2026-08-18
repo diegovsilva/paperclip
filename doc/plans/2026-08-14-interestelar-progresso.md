@@ -749,3 +749,79 @@ com os testes anteriores do arquivo):
 **Ainda não validado**: uma aprovação/rejeição de verdade clicada na UI do Paperclip
 contra uma instância real — só coberto por teste com mocks (mesma situação de todo o
 resto do harness que depende de heartbeat nativo do core).
+
+### 2026-08-18 — Teste ao vivo contra ambiente real: 1 bug real encontrado e corrigido
+
+Diego pediu pra rodar tudo ao vivo com logs capturados. Resumo da sessão:
+
+**Erro operacional meu, não bug do projeto**: o `docker compose exec paperclip pnpm
+paperclipai onboard -y --bind lan` de uma sessão anterior tinha ficado travado — matei
+o processo do lado de fora (`TaskStop`), mas isso **não** encerra o processo dentro do
+container (`docker exec` sem `--sig-proxy`/TTY não propaga o sinal). O processo ficou
+rodando como **root** por ~15 minutos, reexecutando a lógica de onboarding e sobrescrevendo
+`config.json`/`.env`/`data/` etc. como root — enquanto o processo principal do servidor
+(iniciado pelo entrypoint via `gosu node`) continua rodando como usuário `node`.
+Resultado: `data/` ficou root-owned 755, e todo heartbeat real passou a falhar no
+próprio core do Paperclip com `EACCES: permission denied, mkdir
+'/paperclip/instances/default/data/run-logs'` — **antes mesmo de chegar no webhook do
+harness** (confirmado: nenhum desses runIds gerou uma chamada `POST /webhook/head`).
+Corrigido com `docker compose exec paperclip chown -R node:node /paperclip` (matando o
+zumbi antes, embora ele já tivesse terminado sozinho). Lição: depois de matar um
+`docker compose exec` travado, sempre confirmar que o processo morreu de verdade
+*dentro* do container (`docker top`), não só que o comando do lado de fora retornou.
+
+**Bootstrap real completo**: `pnpm paperclipai auth bootstrap-ceo` → invite URL → Diego
+criou a conta admin pelo navegador → desafio `POST /api/cli-auth/challenges` → Diego
+aprovou logado → Board API key real gerada e configurada. `setup_paperclip.py --company-name
+"DataCorp AI"` rodou **100% limpo** contra essa instância: company + 7 agentes + projeto
++ **3 labels** (incluindo a nova `governanca-requer-aprovacao`) + 6 skills + routine +
+trigger, tudo HTTP 200/201.
+
+**Validações reais confirmadas, pela primeira vez contra heartbeat nativo de verdade**
+(não mock):
+- Ticket `DAT-1` criado e atribuído ao Head → classificou, montou `#PLANO:` de 5 passos
+  (`PO → ARQUITETO → GOVERNANÇA → ENGENHEIRO → GOVERNANÇA` — nota: Governança aparece
+  duas vezes no plano gerado pelo LLM; não chegou a causar problema porque
+  `_proximo_agente_do_plano` navega por índice, mas vale observar se isso é comum) →
+  fluxo avançou Head → PO → Arquiteto normalmente.
+- **Reconhecimento de ticket interno do Paperclip, pela primeira vez com um ticket
+  gerado de verdade pelo core** (não mock): o próprio Paperclip criou `DAT-2`
+  ("Recover stalled issue DAT-1", `originKind: stranded_issue_recovery`) por causa das
+  falhas EACCES, atribuiu ao Head automaticamente. Depois do fix de permissão, um
+  comentário nele acordou o Head — reconheceu certinho, comentou explicando que não é
+  uma demanda de dados, desatribuiu, **sem chamar o LLM**. Comportamento idêntico ao
+  projetado e testado só com mock até agora.
+- **Lock por issue + guard de heartbeat obsoleto sob concorrência real**: sob rate
+  limit de verdade da Groq (413 depois 429, com retry automático do SDK de 28s), vários
+  heartbeats concorrentes/redundantes chegaram pro mesmo ticket — todos os obsoletos
+  foram descartados corretamente (`heartbeat.obsoleto.ignorado`) sem gastar chamada de
+  LLM, confirmando as correções de concorrência da sessão de 2026-08-17 sob carga real.
+- **Escalonamento automático por falha de LLM**: a chamada do Arquiteto bateu 413
+  (`Request too large ... TPM Limit 8000, Requested 8796`) — o harness tratou como uma
+  `REVISAO_NECESSARIA` automática pro Head em vez de travar silenciosamente.
+
+**Bug real encontrado e corrigido — loop protection duplicava o aviso sob concorrência**:
+o volume de heartbeats acima (vários quase simultâneos, empilhados pelo retry da Groq)
+bateu o cap de loop protection (11 > 10) — e o mesmo comentário "loop de revisões
+detectado" foi postado **duas vezes em menos de 500ms** pro ticket `DAT-1`. Causa raiz:
+a checagem+resposta da proteção de loop rodava ANTES do lock por issue
+(`_issue_locks`), que só envolvia `_process_demanda_agent` — dois heartbeats
+concorrentes cada um via o cap excedido independentemente. Corrigido em duas partes em
+[harness/webhook.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/harness/webhook.py)
+`_process_agent_webhook`:
+1. A checagem+resposta da proteção de loop agora roda DENTRO do mesmo lock por issue
+   (antes só serializava `_process_demanda_agent`) — extraída pra uma closure
+   `_reportar_loop_protection()`.
+2. Isso por si só só serializa as chamadas, não impede a segunda de tripar de novo (o
+   deque de heartbeats não é resetado ao tripar) — a correção real é uma checagem de
+   **idempotência**: antes de comentar, busca o ticket via `get_issue` e confere se já
+   está sem assignee e com `status: blocked`. Se sim, uma chamada anterior (garantido
+   pelo lock, não uma concorrente) já tripou — descarta silenciosamente sem comentar
+   de novo.
+
+**Teste de regressão**: `test_loop_protection_concorrente_no_mesmo_ticket_comenta_uma_vez_so`
+em `tests/test_webhook_flow_e2e.py` — dispara dois heartbeats de verdade concorrentes
+(`asyncio.gather`) contra o mesmo ticket já no cap, confirma exatamente 1 aviso e 1
+desatribuição. Suíte completa via Docker (`python:3.12-slim` + `git`): **66 passed**
+(65 anteriores + 1 novo), zero regressão. Fix já deployado no ambiente ao vivo
+(`docker compose up -d --force-recreate --no-deps harness`).

@@ -861,60 +861,103 @@ async def _process_agent_webhook(
     client: PaperclipClient,
 ) -> None:
     issue_id = payload.context.taskId
-    if not await _check_loop_protection(issue_id):
+
+    async def _reportar_loop_protection() -> None:
+        if issue_id:
+            # Idempotência: o lock por issue (ver chamador) garante que duas chamadas
+            # concorrentes não leem-e-escrevem intercaladas, mas NÃO impede uma segunda
+            # chamada sequencial de tripar de novo — o deque de _check_loop_protection
+            # não é resetado ao tripar, então a segunda chamada ainda vê o cap
+            # excedido. Confirmado ao vivo em 2026-08-18: dois heartbeats concorrentes
+            # pro mesmo ticket, sob rate limit real da Groq empilhando heartbeats,
+            # cada um tripou a proteção e postou o mesmo aviso separadamente. Checando
+            # o estado atual do ticket antes de agir: se já está sem assignee e
+            # bloqueado, alguém (o lock garante que foi uma chamada anterior, não uma
+            # concorrente) já tripou — só descarta este heartbeat, sem comentar de novo.
+            try:
+                atual = await client.get_issue(issue_id)
+                if atual.get("assigneeAgentId") is None and atual.get("status") == "blocked":
+                    log.info("loop.ja_reportado.descartado", issue=issue_id)
+                    await _safe_callback_heartbeat(
+                        client,
+                        payload.runId,
+                        "failed",
+                        result="Hard loop protection já reportado neste ticket — aguardando intervenção humana.",
+                    )
+                    return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("loop.checar_estado_atual.failed", issue=issue_id, err=str(exc))
+
         await _safe_callback_heartbeat(
             client,
             payload.runId,
             "failed",
             result="Hard loop protection: demasiados heartbeats em pouco tempo. Requer intervenção humana.",
         )
-        if issue_id:
-            # CRÍTICO: precisa desatribuir o ticket ANTES de comentar. Paperclip reacorda
-            # o assignee atual a cada comentário novo — se só comentarmos sem desatribuir,
-            # o próprio aviso de "loop detectado" reacorda o agente, que bate no cap nesse
-            # heartbeat de novo, comenta de novo, reacorda de novo... um loop infinito do
-            # próprio aviso de loop (confirmado ao vivo: o mesmo aviso postado dezenas de
-            # vezes seguidas). Desatribuir primeiro garante que não sobra ninguém pra
-            # Paperclip acordar depois deste comentário.
-            try:
-                await client.update_issue(issue_id, status="blocked", clear_assignee_agent=True)
-            except Exception as exc:  # noqa: BLE001
-                log.error("loop.unassign.failed", issue=issue_id, err=str(exc))
-            try:
-                await client.add_comment(
-                    issue_id,
-                    "**Atenção:** loop de revisões detectado e interrompido automaticamente. "
-                    "Ticket desatribuído e marcado como bloqueado — requer decisão humana "
-                    "(reatribuir manualmente para um agente) para prosseguir.",
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        return
-
-    log.info(
-        "heartbeat.received",
-        agent=agent_slug,
-        run_id=payload.runId,
-        issue_id=issue_id,
-        reason=payload.context.wakeReason,
-    )
+        if not issue_id:
+            return
+        # CRÍTICO: precisa desatribuir o ticket ANTES de comentar. Paperclip reacorda
+        # o assignee atual a cada comentário novo — se só comentarmos sem desatribuir,
+        # o próprio aviso de "loop detectado" reacorda o agente, que bate no cap nesse
+        # heartbeat de novo, comenta de novo, reacorda de novo... um loop infinito do
+        # próprio aviso de loop (confirmado ao vivo: o mesmo aviso postado dezenas de
+        # vezes seguidas). Desatribuir primeiro garante que não sobra ninguém pra
+        # Paperclip acordar depois deste comentário.
+        try:
+            await client.update_issue(issue_id, status="blocked", clear_assignee_agent=True)
+        except Exception as exc:  # noqa: BLE001
+            log.error("loop.unassign.failed", issue=issue_id, err=str(exc))
+        try:
+            await client.add_comment(
+                issue_id,
+                "**Atenção:** loop de revisões detectado e interrompido automaticamente. "
+                "Ticket desatribuído e marcado como bloqueado — requer decisão humana "
+                "(reatribuir manualmente para um agente) para prosseguir.",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     try:
         if agent_slug == "curador-skills":
+            if not await _check_loop_protection(issue_id):
+                await _reportar_loop_protection()
+                return
+            log.info(
+                "heartbeat.received",
+                agent=agent_slug,
+                run_id=payload.runId,
+                issue_id=issue_id,
+                reason=payload.context.wakeReason,
+            )
             await _process_curador(payload, client)
         else:
             assert issue_id is not None
-            # Serializa heartbeats concorrentes do MESMO ticket (ver comentário em
-            # _issue_locks) — sem isso, dois heartbeats disputando o mesmo issue_id
-            # fazem leitura-e-escrita intercalada e um desfaz a reatribuição do outro.
+            # Serializa TUDO relacionado a este ticket sob o mesmo lock — inclusive a
+            # checagem e a resposta da proteção de loop, não só _process_demanda_agent.
+            # Sem isso, dois heartbeats concorrentes pro mesmo ticket cada um vê o cap
+            # excedido independentemente (o deque de _check_loop_protection não é
+            # atômico entre os dois) e cada um dispara o aviso — confirmado ao vivo em
+            # 2026-08-18: o mesmo comentário "loop de revisões detectado" postado duas
+            # vezes em menos de 500ms pro mesmo ticket, sob rate limit real da Groq
+            # empilhando heartbeats concorrentes.
             async with _issue_locks[issue_id]:
+                if not await _check_loop_protection(issue_id):
+                    await _reportar_loop_protection()
+                    return
+                log.info(
+                    "heartbeat.received",
+                    agent=agent_slug,
+                    run_id=payload.runId,
+                    issue_id=issue_id,
+                    reason=payload.context.wakeReason,
+                )
                 await _process_demanda_agent(agent_slug, payload, client)
-            await _safe_callback_heartbeat(
-                client,
-                payload.runId,
-                "completed",
-                result=f"Agent {agent_slug} processou tarefa {issue_id}",
-            )
+        await _safe_callback_heartbeat(
+            client,
+            payload.runId,
+            "completed",
+            result=f"Agent {agent_slug} processou tarefa {issue_id}",
+        )
     except PaperclipHTTPError as exc:
         log.error(
             "paperclip.http.error",
