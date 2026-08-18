@@ -539,7 +539,7 @@ corretamente, "testar conexão" funciona com a chave Groq real.
 - ~~**Página de configuração / melhoria de UX**~~ **Feito em 2026-08-17** — `/config`, painel de status + seleção de provider/chaves em português.
 - ~~**Ideias de UX pra depois:** autenticação na página `/config`~~ **Feito em 2026-08-18** — `harness/auth.py`, ver seção abaixo.
 - **Ideias de UX que ainda faltam** (não implementadas, só anotadas): histórico de demandas/tickets processados direto na página; indicador visual de "revisão N/3" por ticket ativo; log ao vivo (WebSocket/SSE) dos heartbeats em vez de só nos logs do container.
-- **Investigar mais a fundo os tickets auto-gerados pelo Paperclip** ("Review productivity for X", "Recover stalled issue for X") — são um recurso nativo do core, atribuídos ao Head automaticamente. Hoje o Head trataria isso como uma demanda normal (tentando montar #PLANO: pra um ticket que na verdade é um review interno). Vale o Head reconhecer esses títulos e simplesmente fechar/comentar sem disparar o pipeline completo.
+- ~~**Investigar mais a fundo os tickets auto-gerados pelo Paperclip**~~ **Feito em 2026-08-18** — ver seção abaixo.
 - **Opcional:** rodar um ticket real do início ao fim sem cancelar, pra ver o fechamento completo (vault + work product + `done`) — ainda não observado ao vivo, só coberto pelo teste automatizado com mock.
 - **Fase 7 — casos restantes:** Curador de Skills fluxo completo, fallback GitHub API, disparo da routine semanal (a routine foi criada com sucesso, mas seu disparo automático no horário marcado — segunda 03:00 UTC — ainda não foi observado).
 - **Ajuste menor opcional:** Head de Dados, ao acordar o primeiro heartbeat, chamar automaticamente `tools_repo.obter_ou_gerar_padrao_e_escrever_vault(...)` se metadata do ticket tiver `repo_url` e anexar resultado na descrição do ticket para os próximos agentes consumirem direto.
@@ -598,3 +598,37 @@ passed** (44 anteriores + 6 novos), nenhuma regressão.
 
 **Ainda pendente da Fase 6**: histórico de demandas na página, badge "Revisão N/3" por
 ticket, log ao vivo dos heartbeats (ver lista de pendências acima, sem mudança).
+
+### 2026-08-18 — Head reconhece tickets auto-gerados pelo Paperclip
+
+Segundo item da sessão: o Head tentava montar `#PLANO:` e rodar o pipeline completo de
+demanda (chamando o LLM) até para tickets que o próprio core do Paperclip cria sozinho
+— revisão de produtividade, recuperação de ticket parado, escalonamento de liveness,
+avaliação de run silenciosa. Todos acabam atribuídos ao Head automaticamente (ver
+`resolveStrandedIssueRecoveryOwnerAgentId` em `recovery/service.ts`: prioriza o manager
+do assignee original, cai pro papel `cto`/`ceo` — no nosso org chart isso sempre resolve
+pro Head).
+
+**Descoberta:** em vez de casar pelo texto do título (frágil — string livre, muda sem
+aviso), o core expõe um campo confiável: `originKind` na linha do banco, devolvido por
+`GET /issues/:id` (`res.json({ ...issue, ... })` em `server/src/routes/issues.ts`).
+Mapeado em `server/src/services/recovery/origins.ts` (`RECOVERY_ORIGIN_KINDS`):
+`issue_productivity_review`, `stranded_issue_recovery`, `harness_liveness_escalation`,
+`stale_active_run_evaluation`.
+
+**`harness/webhook.py`** — `_ORIGENS_INTERNAS_DO_PAPERCLIP` (dict origin_kind → descrição
+em português) + `_descricao_ticket_interno_paperclip(issue_data)`. Checagem inserida em
+`_process_demanda_agent` logo após o guard de heartbeat obsoleto, só para `agent_slug ==
+"head"`: se o `originKind` bate, **não chama o LLM** (economiza TPM à toa, mesma
+preocupação de custo do resto do projeto) — desatribui o ticket (`clear_assignee_agent`)
+**antes** de comentar (mesmo cuidado já validado na proteção de loop: sem assignee, o
+próprio comentário não reacorda ninguém) e posta um comentário único explicando que não
+é uma demanda de dados, deixando pra um humano decidir. Não muda `status` nem fecha como
+`done` — fechar sozinho apagaria a visibilidade de um alerta operacional real (ex.: um
+ticket de verdade travado) que ainda pode precisar de atenção humana.
+
+**Testes**: dois novos em `tests/test_webhook_flow_e2e.py` — confirma que o ticket
+interno não chama o LLM, desatribui antes de comentar, e não mexe no status; e um
+teste de não-regressão confirmando que um ticket normal (sem `originKind` reconhecido)
+continua passando pelo pipeline normalmente. Suíte completa via Docker
+(`python:3.12-slim`): **52 passed** (50 anteriores + 2 novos), zero regressão.

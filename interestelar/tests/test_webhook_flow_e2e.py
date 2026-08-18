@@ -282,6 +282,70 @@ async def test_loop_protection_desatribui_antes_de_comentar(isolated_settings, m
     assert len(unassign_calls) == 1
 
 
+async def test_head_ignora_ticket_interno_do_paperclip_sem_chamar_llm(isolated_settings, monkeypatch):
+    """Tickets que o próprio Paperclip cria sozinho (revisão de produtividade,
+    recuperação de ticket parado, ...) não são demandas de dados — o Head não deve
+    montar #PLANO: nem chamar o LLM pra eles, só comentar e desatribuir pra um humano
+    avaliar. Detectado via originKind (contrato real do core), não pelo texto do
+    título."""
+    from harness import webhook as wh
+
+    client = FakeClient()
+    client.issue["title"] = "Recover stalled issue DATA-42"
+    client.issue["originKind"] = "stranded_issue_recovery"
+    client.issue["assigneeAgentId"] = _agent_id_for("head")
+    client.issue["status"] = "todo"
+
+    chamou_llm = False
+
+    async def _fake_executar_agente(inp):
+        nonlocal chamou_llm
+        chamou_llm = True
+        return AgentOutput(raw_text="não deveria rodar", stage_complete=True)
+
+    monkeypatch.setattr(wh, "executar_agente", _fake_executar_agente)
+
+    payload = HeartbeatPayload(
+        runId="run-interno",
+        agentId=_agent_id_for("head"),
+        companyId=COMPANY_ID,
+        context=HeartbeatContext(taskId=ISSUE_ID, wakeReason="assigned"),
+    )
+    await wh._process_agent_webhook("head", payload, client)
+
+    assert chamou_llm is False, "ticket interno do Paperclip não deveria chamar o LLM"
+    assert client.issue["assigneeAgentId"] is None
+    assert client.issue["status"] == "todo", "status não deveria mudar, só a atribuição"
+    assert len(client.comments) == 1
+    assert "paperclip" in client.comments[0]["body"].lower()
+    assert "recuperação de ticket parado" in client.comments[0]["body"].lower()
+
+    # desatribuir precisa acontecer ANTES de comentar (mesmo cuidado da proteção de
+    # loop — sem isso o próprio comentário reacordaria o Head de novo).
+    unassign_calls = [c for c in client.update_issue_calls if c.get("clear_assignee_agent")]
+    assert len(unassign_calls) == 1
+
+
+async def test_ticket_normal_sem_origin_kind_passa_pelo_pipeline(isolated_settings, monkeypatch):
+    """Confirma que a checagem acima não engole demandas de dados normais — sem
+    originKind reconhecido (o caso comum: ticket criado manualmente ou pelo board), o
+    Head continua chamando o LLM e montando o plano normalmente."""
+    from harness import webhook as wh
+
+    client = FakeClient()
+    client.issue["assigneeAgentId"] = _agent_id_for("head")
+
+    await _run_heartbeat(
+        monkeypatch,
+        client,
+        "head",
+        AgentOutput(raw_text="#PLANO: po\nETAPA_CONCLUIDA\n", stage_complete=True, plan=["po"]),
+        "run-normal",
+    )
+
+    assert client.issue["assigneeAgentId"] == _agent_id_for("po")
+
+
 async def test_limite_de_revisao_por_par_devolve_para_head(isolated_settings, monkeypatch):
     """3ª ida-e-volta entre o mesmo par estoura o limite (harness §2.1) -> o agente
     NÃO reatribui direto ao alvo, volta para o Head para decisão humana."""

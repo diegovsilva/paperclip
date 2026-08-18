@@ -170,6 +170,26 @@ def _agente_para_papel(agent_slug: str) -> str:
     return AGENT_LABELS.get(agent_slug, agent_slug.title())
 
 
+# Tickets que o próprio Paperclip cria sozinho (revisão de produtividade, recuperação de
+# ticket parado, escalonamento de liveness, avaliação de run silenciosa) — não são
+# demandas de dados, então o Head não deve tentar montar um #PLANO: e rotear pelos
+# agentes da DataCorp AI (PO/Arquiteto/Engenheiro/...) neles. Detectado via `originKind`
+# (campo real da linha do banco, devolvido por `GET /issues/:id` — ver
+# server/src/routes/issues.ts `res.json({ ...issue, ... })`), não pelo texto do título:
+# título é string livre e pode mudar no core sem aviso, `originKind` é o contrato de
+# verdade (ver server/src/services/recovery/origins.ts RECOVERY_ORIGIN_KINDS).
+_ORIGENS_INTERNAS_DO_PAPERCLIP = {
+    "issue_productivity_review": "revisão de produtividade de um ticket",
+    "stranded_issue_recovery": "recuperação de ticket parado",
+    "harness_liveness_escalation": "escalonamento de liveness de uma execução",
+    "stale_active_run_evaluation": "avaliação de execução ativa silenciosa",
+}
+
+
+def _descricao_ticket_interno_paperclip(issue_data: dict[str, Any]) -> Optional[str]:
+    return _ORIGENS_INTERNAS_DO_PAPERCLIP.get(issue_data.get("originKind") or "")
+
+
 async def _resolve_company_id(payload: HeartbeatPayload) -> str:
     """companyId pode não vir no payload real do adapter http (ver HeartbeatPayload).
     Cai pro company_id configurado (página /config > PAPERCLIP_COMPANY_ID do .env) —
@@ -356,6 +376,40 @@ async def _process_demanda_agent(
             agent_id_do_heartbeat=payload.agentId,
         )
         return
+
+    if agent_slug == "head":
+        descricao_origem = _descricao_ticket_interno_paperclip(issue_data)
+        if descricao_origem:
+            log.info(
+                "head.ticket_interno_paperclip.ignorado",
+                issue=issue_id,
+                origin_kind=issue_data.get("originKind"),
+            )
+            try:
+                # Desatribui ANTES de comentar — mesmo cuidado da proteção de loop em
+                # _process_agent_webhook: sem assignee, o comentário abaixo não reacorda
+                # ninguém (Paperclip dispara "issue_commented" pro assignee ATUAL a cada
+                # comentário novo, inclusive os que o próprio harness posta).
+                await client.update_issue(issue_id, clear_assignee_agent=True)
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "head.ticket_interno_paperclip.desatribuir_falhou",
+                    issue=issue_id,
+                    err=str(exc),
+                )
+            try:
+                await client.add_comment(
+                    issue_id,
+                    body=(
+                        f"Ticket gerado automaticamente pelo próprio Paperclip ({descricao_origem}) "
+                        "— não é uma demanda de dados da DataCorp AI, então não foi roteado pelo "
+                        "pipeline do Interestelar (PO/Arquiteto/Engenheiro/Governança/Analista). "
+                        "Deixado sem responsável para um humano avaliar."
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("comment.add.failed", issue=issue_id, err=str(exc))
+            return
 
     raw_comments = await client.list_comments(issue_id)
     history_tuples: list[tuple[str, str, str]] = []
