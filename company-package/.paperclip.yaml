@@ -1,0 +1,41 @@
+schema: paperclip/v1
+agents:
+  data-lead:
+    adapter:
+      type: claude_local
+  cloud-engineer:
+    adapter:
+      type: claude_local
+  data-architect:
+    adapter:
+      type: claude_local
+  n8n-engineer:
+    adapter:
+      type: claude_local
+  analytics-engineer:
+    adapter:
+      type: claude_local
+  ml-engineer:
+    adapter:
+      type: claude_local
+  data-tester:
+    adapter:
+      type: gemini_local
+  data-governance:
+    adapter:
+      type: claude_local
+  senior-data-engineer:
+    adapter:
+      type: claude_local
+  python-engineer:
+    adapter:
+      type: claude_local
+  data-observability-engineer:
+    adapter:
+      type: claude_local
+routines:
+  weekly-operating-review:
+    triggers:
+      - kind: schedule
+        cronExpression: "0 9 * * 1"
+        timezone: America/Sao_Paulo

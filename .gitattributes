@@ -1,0 +1,10 @@
+# Scripts executados dentro de containers Linux (via shebang, ex. #!/bin/sh) quebram
+# se o checkout no Windows converter os finais de linha pra CRLF (core.autocrlf=true é
+# comum por padrão) -- o kernel do container falha com "no such file or directory" ao
+# tentar resolver o interpretador "/bin/sh\r". Forçar LF aqui evita isso independente
+# da config local de quem clona o repo.
+*.sh text eol=lf
+Dockerfile text eol=lf
+Dockerfile.* text eol=lf
+*.dockerfile text eol=lf
+docker-entrypoint* text eol=lf

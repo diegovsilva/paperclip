@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interestelar — Painel</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --bg-card: #131824;
+    --bg-card-hover: #171d2c;
+    --border: #232a3b;
+    --border-active: #6366f1;
+    --text: #e6e9f0;
+    --text-dim: #8b93a7;
+    --text-faint: #5a6275;
+    --accent: #818cf8;
+    --accent-strong: #6366f1;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --erro: #f87171;
+    --radius: 10px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .wrap {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+  }
+  header.topo {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  header.topo h1 {
+    font-size: 22px;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  header.topo .sub {
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  .grid-status {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    margin: 24px 0 32px;
+  }
+  .status-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+  }
+  .status-card .label {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .status-card .valor {
+    font-size: 14px;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.erro { background: var(--erro); box-shadow: 0 0 8px var(--erro); }
+  .dot.neutro { background: var(--text-faint); }
+
+  section.painel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+    margin-bottom: 20px;
+  }
+  section.painel h2 {
+    font-size: 15px;
+    margin: 0 0 4px;
+    font-weight: 600;
+  }
+  section.painel p.desc {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin: 0 0 18px;
+  }
+
+  .providers {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .provider-card {
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+    background: var(--bg);
+    position: relative;
+  }
+  .provider-card:hover { background: var(--bg-card-hover); }
+  .provider-card.selecionado {
+    border-color: var(--border-active);
+    background: rgba(99, 102, 241, 0.08);
+  }
+  .provider-card .nome { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+  .provider-card .tag {
+    font-size: 11px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    display: inline-block;
+  }
+  .provider-card .tag.ativo { background: rgba(52, 211, 153, .15); color: var(--ok); }
+  .provider-card .tag.configurado { background: rgba(129, 140, 248, .15); color: var(--accent); }
+  .provider-card .tag.vazio { background: rgba(139, 147, 167, .12); color: var(--text-dim); }
+
+  label {
+    display: block;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    margin: 14px 0 6px;
+  }
+  input[type="text"], input[type="password"], input[type="number"], select {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 9px 11px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  input:focus, select:focus { border-color: var(--accent-strong); }
+  input::placeholder { color: var(--text-faint); }
+  .hint {
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-top: 5px;
+  }
+  .hint a { color: var(--accent); text-decoration: none; }
+  .hint a:hover { text-decoration: underline; }
+
+  .linha-dupla { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+  .acoes {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  button {
+    font-family: inherit;
+    font-size: 13.5px;
+    font-weight: 500;
+    border-radius: 8px;
+    padding: 9px 16px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: opacity .15s, transform .1s;
+  }
+  button:active { transform: scale(0.98); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primario { background: var(--accent-strong); color: white; }
+  button.primario:hover:not(:disabled) { background: var(--accent); }
+  button.secundario { background: transparent; border-color: var(--border); color: var(--text); }
+  button.secundario:hover:not(:disabled) { background: var(--bg-card-hover); }
+
+  .msg-teste {
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    display: none;
+  }
+  .msg-teste.ok { display: block; background: rgba(52, 211, 153, .1); color: var(--ok); }
+  .msg-teste.erro { display: block; background: rgba(248, 113, 113, .1); color: var(--erro); }
+
+  details.avancado { margin-top: 4px; }
+  details.avancado summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    font-size: 13px;
+    padding: 6px 0;
+    user-select: none;
+  }
+  details.avancado summary:hover { color: var(--text); }
+
+  footer {
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 12px;
+    margin-top: 30px;
+    line-height: 1.6;
+  }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--bg-card);
+    border: 1px solid var(--border-active);
+    color: var(--text);
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    opacity: 0;
+    transition: opacity .2s, transform .2s;
+    pointer-events: none;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .spinner {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid rgba(255,255,255,.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: girar .7s linear infinite;
+    margin-right: 6px;
+    vertical-align: -1px;
+  }
+  @keyframes girar { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="topo">
+    <h1>🛰️ Interestelar</h1>
+    <span class="sub">Painel de configuração do harness</span>
+  </header>
+
+  <div class="grid-status" id="statusGrid">
+    <div class="status-card"><div class="label">Harness</div><div class="valor"><span class="dot neutro"></span>carregando…</div></div>
+    <div class="status-card"><div class="label">Paperclip</div><div class="valor"><span class="dot neutro"></span>carregando…</div></div>
+    <div class="status-card"><div class="label">Vault</div><div class="valor"><span class="dot neutro"></span>carregando…</div></div>
+    <div class="status-card"><div class="label">Provider de LLM</div><div class="valor"><span class="dot neutro"></span>carregando…</div></div>
+  </div>
+
+  <section class="painel">
+    <h2>Provider de LLM</h2>
+    <p class="desc">Escolha qual serviço de IA os agentes usam e configure a chave de API. A troca vale no próximo heartbeat — não precisa reiniciar nada.</p>
+
+    <div class="providers" id="providersGrid"></div>
+
+    <div id="formProvider"></div>
+
+    <div class="acoes">
+      <button class="secundario" id="btnTestar">Testar conexão</button>
+      <button class="primario" id="btnSalvar">Salvar e usar este provider</button>
+      <span id="msgTeste" class="msg-teste"></span>
+    </div>
+
+    <details class="avancado">
+      <summary>Configurações avançadas (temperatura, limite de tokens)</summary>
+      <div class="linha-dupla">
+        <div>
+          <label for="inputTemp">Temperatura (0 a 1 — quanto maior, mais criativo/menos previsível)</label>
+          <input type="number" id="inputTemp" min="0" max="1" step="0.05">
+        </div>
+        <div>
+          <label for="inputTokens">Máximo de tokens por resposta</label>
+          <input type="number" id="inputTokens" min="256" max="32768" step="256">
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <section class="painel">
+    <h2>Conexões</h2>
+    <p class="desc">Credenciais que o harness usa pra falar com o Paperclip e com os repositórios (GitHub/GitLab). Salvo aqui tem prioridade sobre o <code>.env</code> e vale no próximo heartbeat — sem reiniciar.</p>
+
+    <label for="connPaperclipApiKey">Paperclip — API key (board)</label>
+    <input type="password" id="connPaperclipApiKey" placeholder="cole a chave aqui">
+    <div class="hint" id="hintPaperclipApiKey"></div>
+
+    <label for="connPaperclipCompanyId">Paperclip — company_id</label>
+    <input type="text" id="connPaperclipCompanyId" placeholder="ex.: 618f17cc-3979-4e3d-9d3e-d0bb8bd1638b">
+    <div class="hint" id="hintPaperclipCompanyId"></div>
+
+    <div class="acoes">
+      <button class="secundario" id="btnTestarPaperclip">Testar conexão Paperclip</button>
+      <span id="msgTestePaperclip" class="msg-teste"></span>
+    </div>
+
+    <details class="avancado">
+      <summary>GitHub, GitLab e segredo do webhook</summary>
+      <label for="connGithubToken">GitHub — token</label>
+      <input type="password" id="connGithubToken" placeholder="cole o token aqui">
+      <div class="hint" id="hintGithubToken"></div>
+
+      <div class="linha-dupla">
+        <div>
+          <label for="connGitlabToken">GitLab — token</label>
+          <input type="password" id="connGitlabToken" placeholder="cole o token aqui">
+          <div class="hint" id="hintGitlabToken"></div>
+        </div>
+        <div>
+          <label for="connGitlabUrl">GitLab — URL da instância</label>
+          <input type="text" id="connGitlabUrl" placeholder="https://gitlab.com">
+        </div>
+      </div>
+
+      <label for="connWebhookSecret">Segredo de assinatura dos webhooks (HMAC)</label>
+      <input type="password" id="connWebhookSecret" placeholder="deixe vazio se não usar assinatura">
+      <div class="hint">Precisa bater com o segredo configurado no lado do Paperclip que assina as chamadas — trocar aqui sem trocar lá derruba a verificação de assinatura.</div>
+    </details>
+
+    <div class="acoes">
+      <button class="primario" id="btnSalvarConn">Salvar conexões</button>
+      <span id="msgSalvarConn" class="msg-teste"></span>
+    </div>
+  </section>
+
+  <section class="painel">
+    <h2>Comportamento</h2>
+    <p class="desc">Limites operacionais do harness — proteção de loop, revisões entre agentes e cache de padrão de repositório.</p>
+
+    <div class="linha-dupla">
+      <div>
+        <label for="tuneMaxReviewTotal">Revisões totais máx. por ticket</label>
+        <input type="number" id="tuneMaxReviewTotal" min="1" step="1">
+      </div>
+      <div>
+        <label for="tuneMaxReviewPerPair">Idas/voltas máx. entre um par de agentes</label>
+        <input type="number" id="tuneMaxReviewPerPair" min="1" step="1">
+      </div>
+    </div>
+
+    <div class="linha-dupla">
+      <div>
+        <label for="tuneHardLoopCap">Heartbeats máx. por ticket na janela (proteção de loop)</label>
+        <input type="number" id="tuneHardLoopCap" min="1" step="1">
+      </div>
+      <div>
+        <label for="tuneHardLoopWindowMin">Janela da proteção de loop (minutos)</label>
+        <input type="number" id="tuneHardLoopWindowMin" min="1" step="1">
+      </div>
+    </div>
+
+    <label for="tuneRepoPatternTtl">Cache do padrão de repositório expira em (dias)</label>
+    <input type="number" id="tuneRepoPatternTtl" min="1" step="1" style="max-width: 200px;">
+
+    <div class="acoes">
+      <button class="primario" id="btnSalvarTuning">Salvar comportamento</button>
+      <span id="msgSalvarTuning" class="msg-teste"></span>
+    </div>
+  </section>
+
+  <footer>
+    Ferramenta de uso local — as chaves de API ficam salvas no SQLite do harness
+    (<code>db/interestelar.db</code>), não em texto plano em nenhuma tela além desta.<br>
+    Interestelar sobre Paperclip · <a href="/health" style="color:var(--text-faint)">/health</a>
+  </footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+let configAtual = null;
+let providerSelecionado = null;
+
+function mostrarToast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+function dotClasse(ok) {
+  return ok ? 'ok' : 'erro';
+}
+
+async function carregarStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    const grid = $('#statusGrid');
+    grid.innerHTML = `
+      <div class="status-card">
+        <div class="label">Harness</div>
+        <div class="valor"><span class="dot ${dotClasse(s.harnessOk)}"></span>${s.harnessOk ? 'No ar' : 'Indisponível'}</div>
+      </div>
+      <div class="status-card">
+        <div class="label">Paperclip</div>
+        <div class="valor"><span class="dot ${dotClasse(s.paperclipOk)}"></span>${s.paperclipOk ? 'Conectado' : 'Sem conexão'}</div>
+      </div>
+      <div class="status-card">
+        <div class="label">Vault / Repositórios</div>
+        <div class="valor"><span class="dot ${dotClasse(s.vaultReady && s.reposReady)}"></span>${s.vaultReady && s.reposReady ? 'Prontos' : 'Pendente'}</div>
+      </div>
+      <div class="status-card">
+        <div class="label">Provider de LLM</div>
+        <div class="valor"><span class="dot ${dotClasse(s.providerTemChave)}"></span>${s.providerAtivo}${s.providerTemChave ? '' : ' (sem chave)'}</div>
+      </div>
+    `;
+  } catch (e) {
+    console.error('status falhou', e);
+  }
+}
+
+function tagProvider(info, ativo) {
+  if (ativo) return '<span class="tag ativo">● ativo</span>';
+  if (info.temChave) return '<span class="tag configurado">configurado</span>';
+  return '<span class="tag vazio">sem chave</span>';
+}
+
+function renderProviders() {
+  const grid = $('#providersGrid');
+  grid.innerHTML = '';
+  for (const [slug, info] of Object.entries(configAtual.providers)) {
+    const div = document.createElement('div');
+    div.className = 'provider-card' + (slug === providerSelecionado ? ' selecionado' : '');
+    div.dataset.provider = slug;
+    div.innerHTML = `
+      <div class="nome">${info.label}</div>
+      ${tagProvider(info, slug === configAtual.providerAtivo)}
+    `;
+    div.addEventListener('click', () => {
+      providerSelecionado = slug;
+      renderProviders();
+      renderFormulario();
+    });
+    grid.appendChild(div);
+  }
+}
+
+function renderFormulario() {
+  const info = configAtual.providers[providerSelecionado];
+  const container = $('#formProvider');
+  const datalistId = `modelos-${info.provider}`;
+  container.innerHTML = `
+    <label for="inputModel">Modelo</label>
+    <input type="text" id="inputModel" list="${datalistId}" value="${info.model}" placeholder="ex.: ${info.modelosSugeridos[0] || ''}">
+    <datalist id="${datalistId}">
+      ${info.modelosSugeridos.map(m => `<option value="${m}">`).join('')}
+    </datalist>
+
+    <label for="inputApiKey">Chave de API</label>
+    <input type="password" id="inputApiKey" placeholder="${info.chaveMascarada || 'cole sua chave aqui'}">
+    <div class="hint">
+      ${info.temChave ? `Chave configurada (via ${info.fonte === 'env' ? '.env' : 'painel'}) — deixe em branco pra manter.` : 'Nenhuma chave configurada ainda.'}
+      Gerar uma nova em <a href="${info.ondeGerarChave}" target="_blank" rel="noopener">${info.ondeGerarChave}</a>
+    </div>
+  `;
+  $('#msgTeste').className = 'msg-teste';
+  $('#msgTeste').textContent = '';
+}
+
+async function testarConexao() {
+  const btn = $('#btnTestar');
+  const msg = $('#msgTeste');
+  const model = $('#inputModel').value.trim();
+  const apiKey = $('#inputApiKey').value;
+  btn.disabled = true;
+  const textoOriginal = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>Testando…';
+  msg.className = 'msg-teste';
+  try {
+    const r = await fetch('/api/config/llm/testar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: providerSelecionado, model, apiKey }),
+    });
+    const data = await r.json();
+    msg.className = 'msg-teste ' + (data.ok ? 'ok' : 'erro');
+    msg.textContent = data.ok ? `✓ Conectou. Resposta: "${data.mensagem}"` : `✗ ${data.mensagem}`;
+  } catch (e) {
+    msg.className = 'msg-teste erro';
+    msg.textContent = '✗ Falha ao testar: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
+}
+
+async function salvarConfig() {
+  const btn = $('#btnSalvar');
+  const model = $('#inputModel').value.trim();
+  const apiKey = $('#inputApiKey').value;
+  const temperature = parseFloat($('#inputTemp').value);
+  const maxTokens = parseInt($('#inputTokens').value, 10);
+
+  btn.disabled = true;
+  const textoOriginal = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>Salvando…';
+  try {
+    const r = await fetch('/api/config/llm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        providerAtivo: providerSelecionado,
+        temperature: isNaN(temperature) ? undefined : temperature,
+        maxTokens: isNaN(maxTokens) ? undefined : maxTokens,
+        providers: { [providerSelecionado]: { model, apiKey } },
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    configAtual = await r.json();
+    renderProviders();
+    renderFormulario();
+    await carregarStatus();
+    mostrarToast(`Provider salvo: ${configAtual.providers[providerSelecionado].label} está ativo agora.`);
+  } catch (e) {
+    mostrarToast('Erro ao salvar: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
+}
+
+function hintCampo(campo, envVar) {
+  if (!campo.fonte || campo.fonte === 'nenhum') return `Não configurado (nem aqui, nem em ${envVar} no .env).`;
+  return `Configurado via ${campo.fonte === 'env' ? `.env (${envVar})` : 'este painel'}${campo.segredo ? ' — deixe em branco pra manter.' : '.'}`;
+}
+
+async function carregarConn() {
+  const r = await fetch('/api/config/conn');
+  const c = await r.json();
+  $('#connPaperclipApiKey').placeholder = c.paperclipApiKey.valorMascarado || 'cole a chave aqui';
+  $('#hintPaperclipApiKey').textContent = hintCampo(c.paperclipApiKey, 'PAPERCLIP_API_KEY');
+  $('#connPaperclipCompanyId').value = c.paperclipCompanyId.valor;
+  $('#hintPaperclipCompanyId').textContent = hintCampo(c.paperclipCompanyId, 'PAPERCLIP_COMPANY_ID');
+  $('#connGithubToken').placeholder = c.githubToken.valorMascarado || 'cole o token aqui';
+  $('#hintGithubToken').textContent = hintCampo(c.githubToken, 'GITHUB_TOKEN');
+  $('#connGitlabToken').placeholder = c.gitlabToken.valorMascarado || 'cole o token aqui';
+  $('#hintGitlabToken').textContent = hintCampo(c.gitlabToken, 'GITLAB_TOKEN');
+  $('#connGitlabUrl').value = c.gitlabUrl.valor;
+  $('#connWebhookSecret').placeholder = c.harnessWebhookSecret.valorMascarado || 'deixe vazio se não usar assinatura';
+}
+
+async function testarConexaoPaperclip() {
+  const btn = $('#btnTestarPaperclip');
+  const msg = $('#msgTestePaperclip');
+  btn.disabled = true;
+  const textoOriginal = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>Testando…';
+  try {
+    const r = await fetch('/api/config/conn/testar-paperclip', { method: 'POST' });
+    const data = await r.json();
+    msg.className = 'msg-teste ' + (data.ok ? 'ok' : 'erro');
+    msg.textContent = (data.ok ? '✓ ' : '✗ ') + data.mensagem;
+  } catch (e) {
+    msg.className = 'msg-teste erro';
+    msg.textContent = '✗ Falha ao testar: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
+}
+
+async function salvarConn() {
+  const btn = $('#btnSalvarConn');
+  const msg = $('#msgSalvarConn');
+  btn.disabled = true;
+  const textoOriginal = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>Salvando…';
+  try {
+    const r = await fetch('/api/config/conn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        paperclipApiKey: $('#connPaperclipApiKey').value,
+        paperclipCompanyId: $('#connPaperclipCompanyId').value,
+        githubToken: $('#connGithubToken').value,
+        gitlabToken: $('#connGitlabToken').value,
+        gitlabUrl: $('#connGitlabUrl').value,
+        harnessWebhookSecret: $('#connWebhookSecret').value,
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    $('#connPaperclipApiKey').value = '';
+    $('#connGithubToken').value = '';
+    $('#connGitlabToken').value = '';
+    $('#connWebhookSecret').value = '';
+    await carregarConn();
+    await carregarStatus();
+    msg.className = '';
+    msg.textContent = '';
+    mostrarToast('Conexões salvas.');
+  } catch (e) {
+    msg.className = 'msg-teste erro';
+    msg.textContent = '✗ Erro ao salvar: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
+}
+
+async function carregarTuning() {
+  const r = await fetch('/api/config/tuning');
+  const t = await r.json();
+  $('#tuneMaxReviewTotal').value = t.maxReviewTotal;
+  $('#tuneMaxReviewPerPair').value = t.maxReviewPerPair;
+  $('#tuneHardLoopCap').value = t.hardLoopHeartbeatCap;
+  $('#tuneHardLoopWindowMin').value = t.hardLoopWindowMin;
+  $('#tuneRepoPatternTtl').value = t.repoPatternTtlDays;
+}
+
+async function salvarTuning() {
+  const btn = $('#btnSalvarTuning');
+  const msg = $('#msgSalvarTuning');
+  btn.disabled = true;
+  const textoOriginal = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>Salvando…';
+  try {
+    const r = await fetch('/api/config/tuning', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        maxReviewTotal: parseInt($('#tuneMaxReviewTotal').value, 10),
+        maxReviewPerPair: parseInt($('#tuneMaxReviewPerPair').value, 10),
+        hardLoopHeartbeatCap: parseInt($('#tuneHardLoopCap').value, 10),
+        hardLoopWindowMin: parseInt($('#tuneHardLoopWindowMin').value, 10),
+        repoPatternTtlDays: parseInt($('#tuneRepoPatternTtl').value, 10),
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    await carregarTuning();
+    msg.className = '';
+    msg.textContent = '';
+    mostrarToast('Comportamento salvo.');
+  } catch (e) {
+    msg.className = 'msg-teste erro';
+    msg.textContent = '✗ Erro ao salvar: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
+}
+
+async function iniciar() {
+  await carregarStatus();
+  const r = await fetch('/api/config/llm');
+  configAtual = await r.json();
+  providerSelecionado = configAtual.providerAtivo;
+  $('#inputTemp').value = configAtual.temperature;
+  $('#inputTokens').value = configAtual.maxTokens;
+  renderProviders();
+  renderFormulario();
+
+  $('#btnTestar').addEventListener('click', testarConexao);
+  $('#btnSalvar').addEventListener('click', salvarConfig);
+
+  await carregarConn();
+  $('#btnTestarPaperclip').addEventListener('click', testarConexaoPaperclip);
+  $('#btnSalvarConn').addEventListener('click', salvarConn);
+
+  await carregarTuning();
+  $('#btnSalvarTuning').addEventListener('click', salvarTuning);
+
+  setInterval(carregarStatus, 15000);
+}
+
+iniciar();
+</script>
+</body>
+</html>

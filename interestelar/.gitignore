@@ -1,0 +1,28 @@
+# Ambientes virtuais Python usados localmente/testes — nunca commitar
+.venv/
+.venv_test/
+venv/
+
+# Cache de bytecode e de teste
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Estado de runtime — recriado pelo lifespan do FastAPI / docker compose
+db/*.db
+db/*.db-journal
+
+# Conteúdo real gerado pelos agentes fica fora do controle de versão;
+# os .gitkeep continuam versionados para manter a estrutura de pastas.
+vault/Demandas/*.md
+vault/Agentes/**/*.md
+vault/Padrão do Repositório.md
+
+# Repos clonados/submódulos de empresas monitoradas
+repositorios/*/
+
+# Skills propostas pelo Curador aguardando aprovação humana — não commitar
+# automaticamente; a aprovação move para skills/ (esse sim versionado).
+skills_pendentes/*/SKILL.md
+
+.env

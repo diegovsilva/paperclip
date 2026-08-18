@@ -1,0 +1,82 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: paperclip
+      POSTGRES_PASSWORD: paperclip
+      POSTGRES_DB: paperclip
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - paperclip_pgdata:/var/lib/postgresql/data
+
+  paperclip:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "3100:3100"
+    environment:
+      DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
+      PORT: "3100"
+      SERVE_UI: "true"
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
+      # Persistido em instances/default/config.json (fileConfig.server.bind) ganha de
+      # HOST=0.0.0.0 na resolução de bind (ver server/src/config.ts) — se o config.json
+      # já tiver bind:"loopback" gravado (ex.: onboarding rodou de novo), o container só
+      # escuta em 127.0.0.1 e fica inalcançável para o harness pela rede docker mesmo
+      # com HOST setado. PAPERCLIP_BIND é lido ANTES do fileConfig, garante "lan" (0.0.0.0)
+      # sempre, independente do que estiver persistido.
+      PAPERCLIP_BIND: "lan"
+      PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}"
+      BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
+      # Modo "authenticated"+"private" bloqueia por Host header (private-hostname-guard.ts)
+      # e só libera localhost/127.0.0.1 por padrão. O harness chama via
+      # "http://paperclip:3100" (hostname interno do docker network), então precisa
+      # estar na allowlist — senão toda chamada do harness volta 403.
+      PAPERCLIP_ALLOWED_HOSTNAMES: "paperclip"
+    volumes:
+      - paperclip_data:/paperclip
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3100/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  harness:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      PAPERCLIP_API_URL: "http://paperclip:3100/api"
+    volumes:
+      - ./vault:/app/vault
+      - ./repositorios:/app/repositorios
+      - ./db:/app/db
+      - ./skills_pendentes:/app/skills_pendentes
+      - ./skills:/app/skills:ro
+      - ./agents:/app/agents:ro
+      # scripts/ não é copiado pra dentro da imagem (Dockerfile só copia harness/,
+      # agents/, skills/, skills_pendentes/) — monta pra permitir rodar
+      # `docker compose exec harness python scripts/setup_paperclip.py` de dentro
+      # da rede docker (precisa alcançar o paperclip pelo hostname interno).
+      - ./scripts:/app/scripts:ro
+    depends_on:
+      paperclip:
+        condition: service_healthy
+
+volumes:
+  paperclip_pgdata:
+  paperclip_data:

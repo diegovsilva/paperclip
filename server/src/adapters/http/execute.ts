@@ -34,7 +34,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       exitCode: 0,
       signal: null,
       timedOut: false,
-      summary: `HTTP ${method} ${url}`,
+      // Sem `summary` aqui de propósito: agentes http são fire-and-forget (o worker do
+      // agente responde 2xx e processa em background) — o core marca a run como
+      // concluída assim que ESTA chamada recebe 2xx, muito antes do worker ter tido
+      // chance de postar seu próprio comentário no issue. Se `summary` fosse setado
+      // (era `HTTP ${method} ${url}`), heartbeat.ts posta esse texto como se fosse "o
+      // resultado" da run (buildHeartbeatRunIssueComment em heartbeat-run-summary.ts) —
+      // confirmado num teste real: toda invocação virava um comentário ruidoso
+      // "HTTP POST http://harness:8000/webhook/head" na timeline do ticket, antes (e
+      // sobrepondo) o comentário real do agente. A URL configurada não é um resultado
+      // apresentável de qualquer forma — é config estática, igual em toda run do agente.
+      summary: null,
     };
   } catch (err) {
     if (timer && err instanceof Error && err.name === "AbortError") {

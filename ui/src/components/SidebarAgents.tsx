@@ -62,12 +62,12 @@ function SidebarAgentItem({
   const isActive = activeAgentId === routeRef;
   const isPaused = agent.status === "paused";
   const isBudgetPaused = isPaused && agent.pauseReason === "budget";
-  const pauseResumeLabel = isPaused ? "Resume agent" : "Pause agent";
+  const pauseResumeLabel = isPaused ? "Retomar agente" : "Pausar agente";
   const pauseResumeDisabled = disabled || agent.status === "pending_approval" || isBudgetPaused;
   const pauseResumeDisabledLabel = disabled
-    ? "Updating..."
+    ? "Atualizando..."
     : isBudgetPaused
-      ? "Budget paused"
+      ? "Pausado por orcamento"
       : pauseResumeLabel;
 
   return (
@@ -90,7 +90,7 @@ function SidebarAgentItem({
         {(agent.pauseReason === "budget" || runCount > 0) && (
           <span className="ml-auto flex items-center gap-1.5 shrink-0">
             {agent.pauseReason === "budget" ? (
-              <BudgetSidebarMarker title="Agent paused by budget" />
+              <BudgetSidebarMarker title="Agente pausado por orcamento" />
             ) : null}
             {runCount > 0 ? (
               <span className="relative flex h-2 w-2">
@@ -100,7 +100,7 @@ function SidebarAgentItem({
             ) : null}
             {runCount > 0 ? (
               <span className="text-[11px] font-medium text-blue-600 dark:text-blue-400">
-                {runCount} live
+                {runCount} ao vivo
               </span>
             ) : null}
           </span>
@@ -118,7 +118,7 @@ function SidebarAgentItem({
                 ? "opacity-100"
                 : "pointer-events-none opacity-0 group-hover/agent:pointer-events-auto group-hover/agent:opacity-100 group-focus-within/agent:pointer-events-auto group-focus-within/agent:opacity-100",
             )}
-            aria-label={`Open actions for ${agent.name}`}
+            aria-label={`Abrir acoes de ${agent.name}`}
           >
             <MoreHorizontal className="h-3.5 w-3.5" />
           </Button>
@@ -132,7 +132,7 @@ function SidebarAgentItem({
               }}
             >
               <Pencil className="size-4" />
-              <span>Edit agent</span>
+              <span>Editar agente</span>
             </Link>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
@@ -142,7 +142,7 @@ function SidebarAgentItem({
               onPauseResume(agent, isPaused ? "resume" : "pause");
             }}
             disabled={pauseResumeDisabled}
-            title={isBudgetPaused ? "Agent was paused by budget limits" : undefined}
+            title={isBudgetPaused ? "O agente foi pausado por limite de orcamento" : undefined}
           >
             {isPaused ? <PlayCircle className="size-4" /> : <PauseCircle className="size-4" />}
             <span>{pauseResumeDisabledLabel}</span>

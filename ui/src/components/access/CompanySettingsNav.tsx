@@ -3,10 +3,10 @@ import { Tabs } from "@/components/ui/tabs";
 import { useLocation, useNavigate } from "@/lib/router";
 
 const items = [
-  { value: "general", label: "General", href: "/company/settings" },
-  { value: "environments", label: "Environments", href: "/company/settings/environments" },
-  { value: "access", label: "Access", href: "/company/settings/access" },
-  { value: "invites", label: "Invites", href: "/company/settings/invites" },
+  { value: "general", label: "Geral", href: "/company/settings" },
+  { value: "environments", label: "Ambientes", href: "/company/settings/environments" },
+  { value: "access", label: "Acesso", href: "/company/settings/access" },
+  { value: "invites", label: "Convites", href: "/company/settings/invites" },
 ] as const;
 
 type CompanySettingsTab = (typeof items)[number]["value"];
