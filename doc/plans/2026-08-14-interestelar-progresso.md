@@ -930,3 +930,28 @@ loop protection duplicando aviso, 1 bug de company_id no Approval Gate, 1 bug de
 design do Approval Gate (desatribuir quebrava o wakeup nativo), 1 bug de contrato HTTP
 nunca antes exercitado (upload de anexo). Nenhum desses seria pego só com testes
 mockados — todos exigiram uma instância real do Paperclip rodando.
+
+### 2026-08-18 (continuação) — Alerta crítico no loop protection + mais um enum errado
+
+Diego criou um ticket real (`DAT-5`) pela UI e ele travou — mesmo padrão de sempre:
+Head classificou, PO definiu escopo, Arquiteto bateu 413 na Groq (TPM 8000, prompt
+pedindo 9190), a proteção de loop tripou corretamente (só 1 aviso — confirma o fix de
+cooldown funcionando num caso novo, não só nos meus testes). Pedido: garantir que vá
+pra manual (já ia) e criar um alerta bem crítico.
+
+**`_reportar_loop_protection` agora também eleva a prioridade do ticket** pro nível
+mais alto, e o comentário virou um "🚨 ALERTA CRÍTICO" explícito, explicando a causa
+mais comum (rate limit do provider de LLM) e apontando pra procurar `Erro do modelo
+LLM` nos comentários anteriores antes de reatribuir.
+
+**Mais um enum divergente do core real, achado testando isso ao vivo**:
+`IssuePriority` em `paperclip_client.py` dizia
+`Literal["low", "medium", "high", "urgent"]` — não existe "urgent" de verdade.
+`ISSUE_PRIORITIES` em `packages/shared/src/constants.ts` é
+`["critical", "high", "medium", "low"]`. Uma primeira tentativa do fix usando
+`priority="urgent"` bateu um `422 Validation error` de verdade contra o
+`PATCH /issues/:id` real. Corrigido pra `"critical"`, no Literal e no código.
+
+Suíte completa: **70 passed**, zero regressão. Validado ao vivo: `PATCH` com
+`priority=critical` no `DAT-5` (o ticket real que travou) → `200`, confirmando que o
+valor certo é aceito onde `"urgent"` teria sido rejeitado.
