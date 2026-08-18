@@ -370,6 +370,27 @@ async def salvar_conn(valores: dict[str, Optional[str]]) -> None:
         await mem.salvar_configs(pares)
 
 
+# ─── Auth: senha do HTTP Basic que protege / , /config e /api/config/* ────────────────
+
+_CHAVE_UI_PASSWORD = "ui_password"
+
+
+async def auth_habilitada() -> bool:
+    return bool(await resolver_ui_password())
+
+
+async def resolver_ui_password() -> str:
+    """Senha efetiva (banco > env) — string vazia significa auth desligada.
+    Usada por `harness.auth.exigir_auth_ui` a cada request, então trocar pela
+    página vale já na próxima chamada, sem reiniciar o harness."""
+    valores = await mem.obter_configs([_CHAVE_UI_PASSWORD])
+    return valores.get(_CHAVE_UI_PASSWORD) or settings.harness_ui_password.get_secret_value()
+
+
+async def salvar_ui_password(nova_senha: str) -> None:
+    await mem.salvar_config(_CHAVE_UI_PASSWORD, nova_senha)
+
+
 # ─── Tuning: parâmetros de comportamento (limites de revisão, proteção de loop, TTL) ──
 
 _CHAVE_MAX_REVIEW_TOTAL = "tune_max_review_total"

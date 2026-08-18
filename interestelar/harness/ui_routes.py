@@ -7,11 +7,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from . import llm_client
 from . import runtime_config as rc
+from .auth import exigir_auth_ui
 from .config import get_settings
 from .logging_setup import setup_logging
 from .paperclip_client import PaperclipClient
@@ -19,7 +20,9 @@ from .paperclip_client import PaperclipClient
 log = setup_logging()
 settings = get_settings()
 
-router = APIRouter(include_in_schema=False)
+# Protege TODA rota deste router (páginas + /api/config/* + /api/status) com HTTP
+# Basic — ver harness/auth.py. Fica sem efeito enquanto nenhuma senha for configurada.
+router = APIRouter(include_in_schema=False, dependencies=[Depends(exigir_auth_ui)])
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -266,6 +269,30 @@ async def salvar_config_tuning(body: SalvarTuningIn) -> TuningConfigOut:
     return await obter_config_tuning()
 
 
+# ─── Auth: senha do HTTP Basic que protege esta página inteira ────────────────────────
+
+class SalvarUiPasswordIn(BaseModel):
+    novaSenha: str
+
+
+class SalvarUiPasswordOut(BaseModel):
+    ok: bool
+    habilitada: bool
+
+
+@router.post("/api/config/ui-password", response_model=SalvarUiPasswordOut)
+async def salvar_senha_ui(body: SalvarUiPasswordIn) -> SalvarUiPasswordOut:
+    nova = body.novaSenha.strip()
+    if nova and len(nova) < 8:
+        raise HTTPException(status_code=400, detail="use pelo menos 8 caracteres")
+    await rc.salvar_ui_password(nova)
+    log.info("ui.senha.alterada", habilitada=bool(nova))
+    # Se "nova" veio vazia, cai de volta pro valor do .env (ver
+    # runtime_config.resolver_ui_password) — só desliga a auth de fato se o .env
+    # também estiver vazio, igual ao resto das configs banco>env deste harness.
+    return SalvarUiPasswordOut(ok=True, habilitada=await rc.auth_habilitada())
+
+
 class StatusOut(BaseModel):
     harnessOk: bool
     paperclipOk: bool
@@ -274,6 +301,7 @@ class StatusOut(BaseModel):
     reposReady: bool
     providerAtivo: str
     providerTemChave: bool
+    authHabilitada: bool
 
 
 @router.get("/api/status", response_model=StatusOut)
@@ -297,4 +325,5 @@ async def status_geral() -> StatusOut:
         reposReady=settings.repositorios_path.exists(),
         providerAtivo=resumo.provider_ativo,
         providerTemChave=bool(ativo and ativo.tem_chave),
+        authHabilitada=await rc.auth_habilitada(),
     )

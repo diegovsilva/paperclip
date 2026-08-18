@@ -10,9 +10,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Deque, Literal, Optional
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from .auth import exigir_auth_ui
 from .config import get_settings
 from .engine_prompt import (
     AGENT_LABELS,
@@ -721,7 +722,7 @@ app.router.add_api_route("/webhook/analista", _make_route("analista"), methods=[
 app.router.add_api_route("/webhook/curador-skills", _make_route("curador-skills"), methods=["POST"], status_code=status.HTTP_202_ACCEPTED, tags=["agentes"])
 
 
-@app.post("/aprovar-skill/{nome}", tags=["curadoria"])
+@app.post("/aprovar-skill/{nome}", tags=["curadoria"], dependencies=[Depends(exigir_auth_ui)])
 async def aprovar_skill(nome: str, aprovada_por: str = "board") -> dict[str, Any]:
     pendente = Path("./skills_pendentes") / nome / "SKILL.md"
     destino = Path("./skills") / nome / "SKILL.md"

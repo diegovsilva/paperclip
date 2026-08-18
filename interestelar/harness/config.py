@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     reversa_claude_code_auth: SecretStr = Field(default=SecretStr(""))
 
     harness_webhook_secret: SecretStr = Field(default=SecretStr(""))
+    # Senha do HTTP Basic exigido em /, /config e /api/config/* — vazia por padrão
+    # (auth desligada, mesmo comportamento de sempre). Definir aqui ou pela própria
+    # página passa a exigir login; banco de dados (runtime_config) tem prioridade
+    # sobre este valor, igual às outras configs editáveis pela UI.
+    harness_ui_password: SecretStr = Field(default=SecretStr(""))
     harness_host: str = Field(default="0.0.0.0")
     harness_port: int = Field(default=8000)
     harness_rate_limit_per_min: int = Field(default=120)

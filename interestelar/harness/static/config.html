@@ -327,6 +327,20 @@
   </section>
 
   <section class="painel">
+    <h2>Segurança</h2>
+    <p class="desc" id="descSeguranca">Senha exigida pra abrir esta página e chamar as rotas de configuração. Sem usuário — qualquer login do navegador serve, só a senha é conferida.</p>
+
+    <label for="inputUiPassword">Nova senha</label>
+    <input type="password" id="inputUiPassword" placeholder="mínimo 8 caracteres" autocomplete="new-password">
+    <div class="hint">Deixe em branco e salve pra voltar ao valor do <code>HARNESS_UI_PASSWORD</code> do <code>.env</code> (ou desligar a proteção, se ele também estiver vazio).</div>
+
+    <div class="acoes">
+      <button class="primario" id="btnSalvarSenha">Salvar senha</button>
+      <span id="msgSalvarSenha" class="msg-teste"></span>
+    </div>
+  </section>
+
+  <section class="painel">
     <h2>Comportamento</h2>
     <p class="desc">Limites operacionais do harness — proteção de loop, revisões entre agentes e cache de padrão de repositório.</p>
 
@@ -363,7 +377,9 @@
 
   <footer>
     Ferramenta de uso local — as chaves de API ficam salvas no SQLite do harness
-    (<code>db/interestelar.db</code>), não em texto plano em nenhuma tela além desta.<br>
+    (<code>db/interestelar.db</code>), não em texto plano em nenhuma tela além desta.
+    Esta página fica protegida por senha assim que uma é definida na seção Segurança
+    (ou via <code>HARNESS_UI_PASSWORD</code> no <code>.env</code>).<br>
     Interestelar sobre Paperclip · <a href="/health" style="color:var(--text-faint)">/health</a>
   </footer>
 </div>
@@ -408,7 +424,17 @@ async function carregarStatus() {
         <div class="label">Provider de LLM</div>
         <div class="valor"><span class="dot ${dotClasse(s.providerTemChave)}"></span>${s.providerAtivo}${s.providerTemChave ? '' : ' (sem chave)'}</div>
       </div>
+      <div class="status-card">
+        <div class="label">Autenticação</div>
+        <div class="valor"><span class="dot ${dotClasse(s.authHabilitada)}"></span>${s.authHabilitada ? 'Ativa' : 'Desativada'}</div>
+      </div>
     `;
+    const desc = $('#descSeguranca');
+    if (desc) {
+      desc.textContent = s.authHabilitada
+        ? 'Senha exigida pra abrir esta página e chamar as rotas de configuração. Sem usuário — qualquer login do navegador serve, só a senha é conferida.'
+        : '⚠ Sem senha configurada — qualquer pessoa com acesso a esta porta abre e edita esta página. Defina uma senha abaixo, principalmente se a porta 8000 estiver acessível fora do seu computador.';
+    }
   } catch (e) {
     console.error('status falhou', e);
   }
@@ -608,6 +634,44 @@ async function salvarConn() {
   }
 }
 
+async function salvarSenhaUi() {
+  const btn = $('#btnSalvarSenha');
+  const msg = $('#msgSalvarSenha');
+  const input = $('#inputUiPassword');
+  const senha = input.value;
+  if (senha && senha.length < 8) {
+    msg.className = 'msg-teste erro';
+    msg.textContent = '✗ Use pelo menos 8 caracteres (ou deixe em branco).';
+    return;
+  }
+  btn.disabled = true;
+  const textoOriginal = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>Salvando…';
+  try {
+    const r = await fetch('/api/config/ui-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ novaSenha: senha }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    input.value = '';
+    await carregarStatus();
+    msg.className = '';
+    msg.textContent = '';
+    mostrarToast(data.habilitada ? 'Senha salva. Da próxima vez o navegador vai pedir login.' : 'Proteção desativada.');
+  } catch (e) {
+    msg.className = 'msg-teste erro';
+    msg.textContent = '✗ Erro ao salvar: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
+}
+
 async function carregarTuning() {
   const r = await fetch('/api/config/tuning');
   const t = await r.json();
@@ -669,6 +733,8 @@ async function iniciar() {
   await carregarConn();
   $('#btnTestarPaperclip').addEventListener('click', testarConexaoPaperclip);
   $('#btnSalvarConn').addEventListener('click', salvarConn);
+
+  $('#btnSalvarSenha').addEventListener('click', salvarSenhaUi);
 
   await carregarTuning();
   $('#btnSalvarTuning').addEventListener('click', salvarTuning);

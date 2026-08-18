@@ -1,7 +1,7 @@
 # Progresso: Implementação Interestelar
 
 > Início: 2026-08-14
-> Última atualização: 2026-08-17
+> Última atualização: 2026-08-18
 
 ---
 
@@ -15,7 +15,7 @@
 | 3 — Tools (memória, obsidian, repo, curador) | Concluída | tools_memoria.py (SQLite + harness de revisão), tools_obsidian.py (escrita atômica), tools_repo.py (fallbacks Reversa→GitHub→GitLab→local), tools_skill_curator.py (ciclo semanal) | 2026-08-14 |
 | 4 — Fluxo de demanda & harness de revisão | Concluída | engine_prompt.py (monta prompt + chama Groq com retry), webhook.py (v0.2 — Head roteamento, agente genérico, atribuição automática, fechamento Head, contadores de revisão, loop protection duplo) | 2026-08-14 |
 | 5 — Integração Paperclip (setup script) | Concluída e validada contra o real | scripts/setup_paperclip.py rodado com sucesso (100% HTTP 200/201) contra Paperclip real: company + 7 agentes + projeto + 2 labels + 6 skills + routine/trigger | 2026-08-17 |
-| 6 — UI opcional | Pendente | — | — |
+| 6 — UI opcional | Em andamento — auth da página `/config` feita | `harness/auth.py` (HTTP Basic, banco>env, desligada por padrão), seção "Segurança" na página, 6 testes novos | 2026-08-18 |
 | 7 — Testes ponta-a-ponta | MVP validado de ponta a ponta contra ambiente real, incidente real corrigido | 30 testes automatizados (pytest); 9 bugs de contrato de API + 2 bugs de roteamento + 3 bugs de concorrência corrigidos (incl. loop do próprio aviso de loop, achado em produção); provider de LLM dinâmico (`harness/llm_client.py`, Groq/OpenAI/Anthropic); `start.sh`/`start.ps1` criados; `docker compose` + bootstrap + `setup_paperclip.py` + fluxo de demanda, tudo validado contra o Paperclip real rodando. | 2026-08-17 |
 
 ---
@@ -537,10 +537,64 @@ corretamente, "testar conexão" funciona com a chave Groq real.
 - ~~**Fase 7 — validação contra ambiente real**~~ **Feito em 2026-08-17** — `docker compose up`, bootstrap, `setup_paperclip.py` e fluxo de demanda com Groq real, todos validados contra uma instância viva.
 - ~~**Provider de LLM dinâmico**~~ **Feito em 2026-08-17** — `harness/llm_client.py` + `runtime_config.py` com `LLM_PROVIDER=groq|openai|anthropic`, editável em runtime.
 - ~~**Página de configuração / melhoria de UX**~~ **Feito em 2026-08-17** — `/config`, painel de status + seleção de provider/chaves em português.
-- **Ideias de UX pra depois** (não implementadas, só anotadas): autenticação na página `/config` antes de expor a porta 8000 fora do localhost (hoje sem auth, mesmo padrão do resto do harness); histórico de demandas/tickets processados direto na página; indicador visual de "revisão N/3" por ticket ativo; log ao vivo (WebSocket/SSE) dos heartbeats em vez de só nos logs do container.
+- ~~**Ideias de UX pra depois:** autenticação na página `/config`~~ **Feito em 2026-08-18** — `harness/auth.py`, ver seção abaixo.
+- **Ideias de UX que ainda faltam** (não implementadas, só anotadas): histórico de demandas/tickets processados direto na página; indicador visual de "revisão N/3" por ticket ativo; log ao vivo (WebSocket/SSE) dos heartbeats em vez de só nos logs do container.
 - **Investigar mais a fundo os tickets auto-gerados pelo Paperclip** ("Review productivity for X", "Recover stalled issue for X") — são um recurso nativo do core, atribuídos ao Head automaticamente. Hoje o Head trataria isso como uma demanda normal (tentando montar #PLANO: pra um ticket que na verdade é um review interno). Vale o Head reconhecer esses títulos e simplesmente fechar/comentar sem disparar o pipeline completo.
 - **Opcional:** rodar um ticket real do início ao fim sem cancelar, pra ver o fechamento completo (vault + work product + `done`) — ainda não observado ao vivo, só coberto pelo teste automatizado com mock.
 - **Fase 7 — casos restantes:** Curador de Skills fluxo completo, fallback GitHub API, disparo da routine semanal (a routine foi criada com sucesso, mas seu disparo automático no horário marcado — segunda 03:00 UTC — ainda não foi observado).
 - **Ajuste menor opcional:** Head de Dados, ao acordar o primeiro heartbeat, chamar automaticamente `tools_repo.obter_ou_gerar_padrao_e_escrever_vault(...)` se metadata do ticket tiver `repo_url` e anexar resultado na descrição do ticket para os próximos agentes consumirem direto.
 - **Fase 6 opcional:** Badge "Revisão N/3" no IssueRow do UI, botão "Aprovar Skill" em CommentThread.
 - **Governança como Approval Gate:** após MVP rodar; configurar approval do Paperclip que requer ação do agente Governança antes de `done` (§5.2 roadmap).
+
+### 2026-08-18 — Auth HTTP Basic na página `/config`
+
+Publicado o projeto no GitHub (`diegovsilva/interestelar`, `paperclip` como submódulo
+apontando pro fork `diegovsilva/paperclip` branch `datacorp-ai`). Em seguida, item de
+segurança que já estava anotado como pendente: a página de configuração (provider de
+LLM, chaves, tokens de conexão) ficava exposta na porta 8000 sem senha nenhuma.
+
+**Criado [harness/auth.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/harness/auth.py)**
+— dependency HTTP Basic (`exigir_auth_ui`) sem conceito de usuário: qualquer login do
+navegador serve, só a senha é conferida com `secrets.compare_digest`. Segue o mesmo
+padrão "vazio = desligado" já usado pelo `HARNESS_WEBHOOK_SECRET`
+(`webhook._verify_webhook_signature`) — não quebra quem já está rodando sem senha.
+
+**`harness/config.py`** — novo `harness_ui_password: SecretStr`, default vazio.
+**`harness/runtime_config.py`** — `resolver_ui_password()` / `salvar_ui_password()` /
+`auth_habilitada()`, mesma prioridade banco>env de todo o resto do runtime_config.
+
+**Aplicado em:**
+- `router = APIRouter(..., dependencies=[Depends(exigir_auth_ui)])` em
+  `ui_routes.py` — protege `/`, `/config` e todo `/api/config/*` e `/api/status` de
+  uma vez só.
+- `POST /aprovar-skill/{nome}` em `webhook.py` — ação de aprovação humana, também
+  ganhou o `Depends`.
+- **Não** protegido: `/health` (healthcheck do Docker) e `/webhook/*` (chamado pelo
+  Paperclip; já tem verificação própria por assinatura HMAC).
+
+**Bootstrap sem galinha-e-ovo:** a primeira definição de senha
+(`POST /api/config/ui-password`) roda sem credenciais porque, até aquele ponto,
+nenhuma senha existe — mesma lógica do `HARNESS_WEBHOOK_SECRET`. Depois que uma senha
+é salva, a própria rota de troca de senha passa a exigir a senha atual (testado:
+resetar pra vazio sem estar autenticado dá 401, não reabre a proteção).
+
+**Página** ([harness/static/config.html](file:///d:/orchestration-zero-humans/paperclip/interestelar/harness/static/config.html))
+— nova seção "Segurança" (campo de senha + botão salvar) e um card "Autenticação"
+no painel de status, com aviso vermelho quando está desativada. Sem mudança de fluxo
+de login no HTML/JS: com HTTP Basic o próprio navegador mostra o diálogo nativo de
+usuário/senha ao carregar `/` ou `/config` pela primeira vez, e reaproveita a
+credencial nas chamadas `fetch()` seguintes — não precisou de tela de login nem de
+gestão de sessão/cookie.
+
+**`.env.example`** — `HARNESS_UI_PASSWORD=` documentada perto do `HARNESS_WEBHOOK_SECRET`.
+
+**Testes**: [tests/test_auth.py](file:///d:/orchestration-zero-humans/paperclip/interestelar/tests/test_auth.py)
+novo, 6 casos (sem senha não bloqueia; definir senha passa a exigir login; usuário é
+ignorado, só a senha conta; senha curta é rejeitada com 400; resetar senha sem auth
+falha; `/health` e `/webhook/*` continuam abertos; `/aprovar-skill` exige auth).
+Suíte completa rodada via Docker (`python:3.12-slim` — o Python 3.14 local não tem
+wheel pré-compilada pra `pydantic-core` e a toolchain Rust local não linka): **50
+passed** (44 anteriores + 6 novos), nenhuma regressão.
+
+**Ainda pendente da Fase 6**: histórico de demandas na página, badge "Revisão N/3" por
+ticket, log ao vivo dos heartbeats (ver lista de pendências acima, sem mudança).
